@@ -1,119 +1,72 @@
-# 🌡️ PC Cooling & Acoustics Analyzer Suite
+# ❄️ PC Cooling Analyzer
 
-> A professional Python-based diagnostic suite for comprehensive thermal, electrical, and acoustic benchmarking of PC cooling systems (AIO liquid coolers and air cooling setups).
+A high-performance, modular hardware telemetry and acoustic spectral analysis suite built for PC cooling benchmarks, thermal testing, and noise diagnostics.
 
----
-
-## 🚧 Project Status
-
-This project is currently under **active development**. Core telemetry logging, real-time GUI analytics, and spectral audio analysis modules are fully functional, while advanced diagnostic features and UI refinements are continuously being polished.
+> **Status:** 🚧 Under Development (Phase: Core Logic & User Experience)
 
 ---
 
-## 🎯 About the Project
+## 🌍 Overview
 
-**PC-Cooling-Analyzer** is designed for enthusiasts, overclockers, and hardware reviewers who need precise, hardware-level diagnostic data. Unlike standard monitoring tools, this suite synchronizes high-frequency hardware telemetry (via LibreHardwareMonitor) with real-time acoustic spectrum analysis, allowing you to correlate thermal spikes, power loads, and fan RPMs with specific acoustic resonance frequencies and noise levels.
-
-### 🌟 Key Features
-
-*   **📊 Hardware Telemetry Logging:** Polls 273+ system sensors at 4 Hz (250ms interval) via LibreHardwareMonitor Web API.
-*   **🎧 DAW-Style Spectral Audio Analyzer:** High-performance PyQt6 + PyQtGraph frequency analyzer featuring a real-time live FFT spectrum, 2D spectrogram heatmap, and selective bandpass audio filtering.
-*   **⚡ Accelerated Visualization:** Built on PyQt6 and pyqtgraph with GPU (OpenGL) acceleration for butter-smooth telemetry rendering.
-*   **🎛️ Interactive Analytics & LOD:** Adjustable trend smoothing, raw data opacity ("fog"), multi-Y axis overlays with dynamic L/R positioning, and real-time summary metric recalculation using custom time selections.
-*   **📋 Sensor Passport & Visibility Control:** Compact sidebar widgets to toggle individual sensor curves and scale axes on the fly.
-*   **💾 Clean Reporting:** Export publication-ready Hi-Res JPG charts and compressed CSV evolution reports with a single click.
+**PC Cooling Analyzer** is an end-to-end benchmarking suite that bridges low-level hardware sensor telemetry with real-time acoustic spectral analysis. It synchronizes multi-sensor logging (temperatures, power draw, fan speeds) with calibrated audio recording and provides GPU-accelerated (60+ FPS) visualizers for deep thermal and acoustic inspection.
 
 ---
 
-## 🛠️ Tech Stack
+## 🌟 Key Features
 
-*   **Language:** Python 3.10+
-*   **GUI Framework:** PyQt6, PyQtGraph (OpenGL accelerated)
-*   **Audio DSP:** NumPy, SciPy (STFT/Spectrogram, Butterworth filters), SoundDevice, SoundFile
-*   **Data Processing:** Pandas, Matplotlib
+*   **Synchronized Logging:** Captures all hardware sensors at 4 Hz via LibreHardwareMonitor alongside continuous calibrated noise recording (dBA).
+*   **Hardware Visualizer (`analyzer.py`):** Interactive dual-panel time series for thermal and cooling dynamics with live on-curve values, custom time region statistics, and 1-click layout persistence.
+*   **Spectral Audio DAW (`audio_analyzer.py`):** Real-time FFT acoustic spectrum (20 Hz – 20 kHz) and high-resolution 2D spectrogram with interactive bandpass filtering.
+*   **Unified Controls:** Standardized mouse navigation across both visualizers (pan, zoom, timeline scrub, and region selection).
+*   **Modular Architecture:** Clean separation between core math engines, graphics rendering, and hardware utilities.
 
 ---
 
-## 🚀 Setup & Launch Guide
+## 🚀 Installation & Setup Guide
 
-> **Note:** Because this project is currently in early active development, setting up the initial hardware telemetry pipeline requires a few manual steps. We will streamline and automate this process in future updates!
+### 1. Download LibreHardwareMonitor
+Download [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) [1]. Run `LibreHardwareMonitor.exe` as Administrator, go to **Options**, and enable **Remote Web Server** (default port `8085`) [1].
 
-### Step 1: Install & Configure LibreHardwareMonitor
-1. Download the latest release of **[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)**.
-2. Open LibreHardwareMonitor, go to **Options**, and ensure **Remote Web Server** is enabled (it runs locally on `http://localhost:8085`).
-3. *(Recommended)* Check **Run Minimized** in LibreHardwareMonitor options so the app stays out of your way in the system tray.
-
-### Step 2: Clone Repository & Install Dependencies
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/Quazzy23/PC-Cooling-Analyzer.git
-   cd PC-Cooling-Analyzer
-   ```
-2. **Install Python dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### Step 3: Configure Paths & Sensor Mappings
-1. **Set LHM Executable Path:** 
-   Open `logger.py` and make sure `LHM_EXE_PATH` points directly to your local installation of LibreHardwareMonitor.exe (e.g., `r"C:\Users\YourUser\Downloads\LibreHardwareMonitor\LibreHardwareMonitor.exe"`). This allows the logger to automatically launch LHM in the background with Administrator privileges when started.
-2. **Dump & Map Sensors:**
-   Run the sensor dumper utility to capture a complete snapshot of all hardware sensors available on your motherboard/CPU/GPU:
-   ```bash
-   python utils/dump_sensors.py
-   ```
-   This will generate a reference file at `system_info/lhm_sensors_dump.txt`. Open it to find the exact Sensor IDs for your hardware components, and map them in **`utils/configs.py`**.
-
-### Step 4: Calibrate Microphone (For Acoustic Testing)
-If you are planning to record noise levels and run acoustic diagnostics, run the microphone selector utility once:
+### 2. Requirements & Dependencies
+Ensure **Python 3.10+** is installed, then install dependencies:
 ```bash
-python utils/select_mic.py
+pip install numpy scipy pandas requests pyqt6 pyqtgraph sounddevice soundfile lameenc
 ```
-This will filter available WASAPI audio devices and save your chosen USB microphone to `system_info/audio_config.json`.
 
-### Step 5: Run the Diagnostic Suite
-1. **Start Telemetry & Audio Logging:**
-   ```bash
-   python logger.py
-   ```
-   *(This launches LHM, starts recording all hardware sensors to a raw CSV log, and captures synchronous audio of your test session).*
-2. **Analyze Telemetry & Hardware Dynamics:**
-   ```bash
-   python analyzer.py
-   ```
-3. **Analyze Acoustic Frequencies (DAW Spectrogram):**
-   ```bash
-   python utils/audio_analyzer.py
-   ```
+### 3. Initialize Configurations
+Run `utils/init_configs.py`. Open `system_info/lhm_path.txt` and paste the full path to your `LibreHardwareMonitor.exe`.
+
+### 4. Discover Sensors
+Run `utils/dump_sensors.py` to scan all available hardware sensors and generate `system_info/lhm_sensors_dump.txt`.
+
+### 5. Map Hardware Sensors
+Open `system_info/sensors_config.json` and paste your desired `SensorId`s from the dump file into the `CPU` or `GPU` section.
+
+### 6. Select Microphone
+Run `utils/select_mic.py` and select your input device index from the list.
+
+### 7. Log Benchmark Data
+Run `logger.py` to record telemetry to CSV and synchronized audio to MP3. Press `Ctrl+C` to stop logging.
+
+### 8. Analyze Telemetry
+Run `analyzer.py` and select the target CSV log to inspect interactive charts, summary metrics, and export reports.
+
+### 9. Inspect Audio Spectrum
+Run `audio_analyzer.py` and select the target audio file to inspect live FFT peaks, 2D spectrogram timelines, and acoustic filters.
 
 ---
 
-## 📂 Project Architecture
+## 📁 Repository Structure
 
-```text
-PC-Cooling-Analyzer/
-│
-├── logger.py                 # Main universal telemetry & audio logger
-├── analyzer.py               # Main interactive PyQtGraph hardware visualizer
-├── audio_analyzer.py         # PyQt6 spectral DAW audio analyzer
-│
-├── system_info/              # PC hardware passport & sensor configs
-│   ├── hardware_info.json    # System components data
-│   ├── audio_config.json     # USB microphone calibration config
-│   └── lhm_sensors_dump.txt  # Full text dump of all LHM sensors
-│
-├── utils/                    # Helper scripts & modules
-│   ├── configs.py            # CPU & GPU sensor profile mappings
-│   ├── select_mic.py         # WASAPI microphone selector utility
-│   ├── dump_sensors.py       # LHM Web API sensor dumper
-│
-└── results/                  # Test results (git-ignored)
-    ├── sensors_logs/         # Raw CSV sensor logs & sync MP3 audio
-    └── summary_reports/      # Exported JPG charts & CSV reports
-```
+Currently, this repository hosts the codebase required to run the benchmarking pipeline:
+* `/core` — Data processing engines (telemetry smoothing, metrics, audio DSP, FFT).
+* `/ui` — Stylesheets, custom axes, and the unified interactive ViewBox engine.
+* `/utils` — LHM client, sensor discovery dumpers, mic configuration, and setup scripts.
+* `analyzer.py`, `audio_analyzer.py` & `logger.py` — The primary executable interfaces.
 
 ---
 
-## 👥 Author
+## 👥 Authors & Credits
 
-*   Quazzy ([@Quazzy23](https://github.com/Quazzy23))
+*   **Project Lead:** Quazzy ([@Quazzy23](https://github.com/Quazzy23))
+*   **Development:** Created with the support of Google AI.

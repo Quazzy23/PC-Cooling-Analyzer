@@ -1,5 +1,9 @@
+"""
+Утилита выбора и настройки USB-микрофона для замера шума охлаждения
+"""
 import os
 import sys
+sys.dont_write_bytecode = True
 import json
 
 try:
@@ -8,15 +12,30 @@ except ImportError:
     print("[ERROR] Library 'sounddevice' is not installed! Run: pip install sounddevice numpy")
     sys.exit(1)
 
+# Добавляем корень проекта в пути поиска модулей
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from core.defaults import AUDIO_PROFILE
+
 SYS_INFO_DIR = "system_info"
 os.makedirs(SYS_INFO_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(SYS_INFO_DIR, "audio_config.json")
+
+# Читаем существующую калибровку, если файл уже был создан ранее
+existing_cal_offset = AUDIO_PROFILE.get("calibration_offset", 90.0)
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            old_cfg = json.load(f)
+            existing_cal_offset = float(old_cfg.get("calibration_offset", existing_cal_offset))
+    except Exception:
+        pass
 
 print("=" * 65)
 print("          MICROPHONE SELECTION FOR COOLING BENCHMARKS          ")
 print("=" * 65)
 
-# 1. Query WASAPI input devices without duplicates
+# 1. Запрос устройств WASAPI без дубликатов
 devices = sd.query_devices()
 host_apis = sd.query_hostapis()
 
@@ -54,7 +73,10 @@ print("-" * 65)
 choice = input("Select microphone number for benchmarks: ").strip()
 
 if choice == "0":
-    cfg = {"audio_logging_enabled": False}
+    cfg = {
+        "audio_logging_enabled": False,
+        "calibration_offset": existing_cal_offset
+    }
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
     print("\n[OK] Audio recording DISABLED.")
@@ -71,7 +93,7 @@ cfg = {
     "audio_logging_enabled": True,
     "device_index": selected_idx,
     "device_name": selected_core_name,
-    "calibration_offset": 90.0
+    "calibration_offset": existing_cal_offset
 }
 
 with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -79,6 +101,7 @@ with open(CONFIG_FILE, "w", encoding="utf-8") as f:
 
 print("\n" + "=" * 65)
 print(f"[SUCCESS] Microphone configuration saved to: {CONFIG_FILE}")
-print(f" Selected Device : {selected_core_name}")
+print(f" Selected Device     : {selected_core_name}")
+print(f" Calibration Offset  : {existing_cal_offset:.1f} dB SPL")
 print(" 'logger.py' will now automatically record noise levels from this microphone!")
 print("=" * 65)
