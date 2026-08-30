@@ -24,22 +24,25 @@ A high-performance, modular hardware telemetry and acoustic spectral analysis su
 
 ## 🚀 Installation & Setup Guide
 
-### 1. Download LibreHardwareMonitor
+### 1. Clone the repository
+```bash
+git https://github.com/Quazzy23/PC-Cooling-Analyzer
+```
+
+### 2. Download LibreHardwareMonitor
 Download [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) [1]. Run `LibreHardwareMonitor.exe` as Administrator, go to **Options**, and enable **Remote Web Server** (default port `8085`) [1].
 
-### 2. Requirements & Dependencies
+### 3. Install Dependencies
 Ensure **Python 3.10+** is installed, then install dependencies:
 ```bash
 pip install numpy scipy pandas requests pyqt6 pyqtgraph sounddevice soundfile lameenc
 ```
 
-### 3. Initialize Configurations
+### 4. Initialize Configurations
 Run `utils/init_configs.py`. Open `system_info/lhm_path.txt` and paste the full path to your `LibreHardwareMonitor.exe`.
 
-### 4. Discover Sensors
+### 5. Discover and map sensors
 Run `utils/dump_sensors.py` to scan all available hardware sensors and generate `system_info/lhm_sensors_dump.txt`.
-
-### 5. Map Hardware Sensors
 Open `system_info/sensors_config.json` and paste your desired `SensorId`s from the dump file into the `CPU` or `GPU` section.
 
 ### 6. Select Microphone
@@ -48,10 +51,8 @@ Run `utils/select_mic.py` and select your input device index from the list.
 ### 7. Log Benchmark Data
 Run `logger.py` to record telemetry to CSV and synchronized audio to MP3. Press `Ctrl+C` to stop logging.
 
-### 8. Analyze Telemetry
+### 8. Run analyzes
 Run `analyzer.py` and select the target CSV log to inspect interactive charts, summary metrics, and export reports.
-
-### 9. Inspect Audio Spectrum
 Run `audio_analyzer.py` and select the target audio file to inspect live FFT peaks, 2D spectrogram timelines, and acoustic filters.
 
 ---
