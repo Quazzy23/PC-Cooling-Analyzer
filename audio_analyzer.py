@@ -10,7 +10,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from core.defaults import AUDIO_PROFILE
-from core.audio_engine import AudioEngine, LIMIT_FREQ_MIN, LIMIT_FREQ_MAX
+from core.audio_engine import AudioEngine, LIMIT_FREQ_MIN
 from ui.custom_axes import CleanLogFrequencyAxis
 from ui.viewboxes import FFTFilterViewBox, SpectrogramTimelineViewBox
 from ui.styles import (
@@ -53,7 +53,7 @@ class AudioAnalyzerPro(QtWidgets.QMainWindow):
         # Матрица спектрограммы
         self.spec_db_matrix = None
         self.spec_f_min = LIMIT_FREQ_MIN
-        self.spec_f_max = LIMIT_FREQ_MAX
+        self.spec_f_max = self.engine.sample_rate / 2.0
 
         self.init_ui()
         self.calculate_and_render_spectrogram()
@@ -90,7 +90,8 @@ class AudioAnalyzerPro(QtWidgets.QMainWindow):
             self.plot_fft.addItem(txt)
             self.peak_text_items.append(txt)
 
-        self.plot_fft.setXRange(np.log10(LIMIT_FREQ_MIN), np.log10(LIMIT_FREQ_MAX), padding=0)
+        nyq = self.engine.sample_rate / 2.0
+        self.plot_fft.setXRange(np.log10(LIMIT_FREQ_MIN), np.log10(nyq), padding=0)
         main_layout.addWidget(self.plot_fft, stretch=5)
 
         # 2. Нижний график: 2D-Спектрограмма (на всю ширину)
@@ -195,7 +196,8 @@ class AudioAnalyzerPro(QtWidgets.QMainWindow):
             self.spec_min_v, self.spec_max_v = np.percentile(Sxx_db, [5, 99.5])
             self.img_overview.setImage(Sxx_db.T, levels=[self.spec_min_v, self.spec_max_v])
             self.img_overview.setRect(QtCore.QRectF(0, f_min, self.total_duration, f_max - f_min))
-            self.plot_spec.setRange(xRange=[0, self.total_duration], yRange=[LIMIT_FREQ_MIN, LIMIT_FREQ_MAX], padding=0)
+            nyq = self.engine.sample_rate / 2.0
+            self.plot_spec.setRange(xRange=[0, self.total_duration], yRange=[LIMIT_FREQ_MIN, nyq], padding=0)
             
             self.cursor_line.setPos(0.0)
             self.compute_and_draw_fft_at(0)
@@ -216,14 +218,15 @@ class AudioAnalyzerPro(QtWidgets.QMainWindow):
             print(f"[OK] High-Res view rendered for: {t_start:.2f}s - {t_end:.2f}s (Span: {span:.2f}s)")
 
     def toggle_freq_scale(self):
+        nyq = self.engine.sample_rate / 2.0
         if self.freq_scale_mode == "Log":
             self.freq_scale_mode = "Linear"
             self.btn_scale.setText("Scale: Linear")
-            self.plot_fft.setXRange(LIMIT_FREQ_MIN, LIMIT_FREQ_MAX, padding=0)
+            self.plot_fft.setXRange(LIMIT_FREQ_MIN, nyq, padding=0)
         else:
             self.freq_scale_mode = "Log"
             self.btn_scale.setText("Scale: Log")
-            self.plot_fft.setXRange(np.log10(LIMIT_FREQ_MIN), np.log10(LIMIT_FREQ_MAX), padding=0)
+            self.plot_fft.setXRange(np.log10(LIMIT_FREQ_MIN), np.log10(nyq), padding=0)
         
         with self.engine.filter_lock:
             for filt in self.engine.active_filters:
@@ -234,6 +237,10 @@ class AudioAnalyzerPro(QtWidgets.QMainWindow):
         self.compute_and_draw_fft_at(self.engine.current_sample_idx)
 
     def add_filter_from_fft(self, f_min, f_max, x_min, x_max):
+        # Защита от нуля (минимум 1 Гц)
+        f_min = max(1.0, float(f_min))
+        f_max = max(f_min + 5.0, float(f_max))
+
         top_region = create_clean_region(x_min, x_max)
         self.plot_fft.addItem(top_region, ignoreBounds=True)
 
@@ -253,6 +260,10 @@ class AudioAnalyzerPro(QtWidgets.QMainWindow):
         print(f"[FILTER ACTIVE] Frequency Band: {f_min:.0f} Hz - {f_max:.0f} Hz (All Time)")
 
     def add_2d_spectrogram_filter(self, t_min, t_max, f_min, f_max):
+        # Защита от нуля (минимум 1 Гц)
+        f_min = max(1.0, float(f_min))
+        f_max = max(f_min + 5.0, float(f_max))
+
         bot_rect = create_clean_2d_rect_item(QtCore.QRectF(t_min, f_min, t_max - t_min, f_max - f_min))
         self.plot_spec.addItem(bot_rect, ignoreBounds=True)
 

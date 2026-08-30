@@ -1,7 +1,7 @@
 """
 Аудиодвижок цифровой обработки сигналов (DSP):
 - Воспроизведение звука через sounddevice.OutputStream
-- Потокобезопасная IIR SOS (Баттерворт 4-го порядка) фильтрация
+- Потокобезопасная IIR SOS (Баттерворт 4-го порядка) фильтрация с защитой от зависаний
 - ЕДИНЫЙ расчет dB SPL для Live FFT и 2D-Спектрограммы через amplitude_to_db_spl
 """
 import os
@@ -15,15 +15,8 @@ from core.defaults import AUDIO_PROFILE
 
 TARGET_SPEC_WIDTH = AUDIO_PROFILE["target_spec_width"]
 LIMIT_FREQ_MIN = AUDIO_PROFILE["limit_freq_min"]
-LIMIT_FREQ_MAX = AUDIO_PROFILE["limit_freq_max"]
-
 
 def amplitude_to_db_spl(fft_magnitude, window_length: int, cal_offset: float):
-    """
-    ЕДИНАЯ для всего проекта формула перевода магнитуды FFT в калиброванные dB SPL.
-    Когерентное усиление окна Ханнинга: sum(w) = N / 2.
-    Пиковая амплитуда гармоники: A = 2.0 * |FFT| / sum(w) = |FFT| / (N / 4).
-    """
     w_sum = window_length / 2.0
     amplitude = (2.0 * fft_magnitude) / w_sum
     return 20.0 * np.log10(amplitude + 1e-6) + cal_offset
@@ -41,7 +34,6 @@ class AudioEngine:
         self.boost_db = 30.0
         self.fft_size = 4096
 
-        # Единая калибровка
         self.cal_offset = AUDIO_PROFILE.get("calibration_offset", 90.0)
         cfg_path = os.path.join("system_info", "audio_config.json")
         if os.path.exists(cfg_path):
@@ -61,20 +53,109 @@ class AudioEngine:
         self.init_stream()
 
     def get_bandpass_sos(self, f_low: float, f_high: float):
+        """Создает и кэширует Bandpass фильтр с защитой от 0 Гц и зависаний"""
         nyq = self.sample_rate / 2.0
-        low = max(20.0, float(f_low))
-        high = min(nyq - 50.0, float(f_high))
-
+        
+        # Защита от нуля: минимум 1 Гц
+        low = max(1.0, float(f_low))
+        high = min(nyq - 5.0, float(f_high))
+        
         if low >= high:
-            low = max(20.0, high - 50.0)
+            high = min(nyq - 5.0, low + 100.0)
+            if low >= high:
+                low = max(1.0, high - 100.0)
 
         w_low = low / nyq
-        w_high = min(0.999, high / nyq)
-
+        w_high = high / nyq
+        
         if w_low >= w_high:
-            w_low = max(0.001, w_high - 0.01)
+            w_low = max(0.00005, w_high - 0.01)
+        w_low = max(0.00005, min(0.998, w_low))
+        w_high = max(w_low + 0.0002, min(0.999, w_high))
 
-        return signal.butter(4, [w_low, w_high], btype='bandpass', output='sos')
+        cache_key = (round(w_low, 4), round(w_high, 4))
+        if not hasattr(self, '_sos_cache'):
+            self._sos_cache = {}
+        
+        if cache_key in self._sos_cache:
+            return self._sos_cache[cache_key]
+
+        try:
+            sos = signal.butter(4, [w_low, w_high], btype='bandpass', output='sos')
+            self._sos_cache[cache_key] = sos
+            return sos
+        except Exception:
+            sos = signal.butter(2, [0.0001, 0.99], btype='bandpass', output='sos')
+            return sos
+
+    def compute_fft_at(self, sample_idx: int, freq_scale_mode: str = "Log", isolate_on_filter: bool = False):
+        """Считает Live FFT с защитой от 0 Гц"""
+        start_s = max(0, sample_idx - self.fft_size // 2)
+        end_s = start_s + self.fft_size
+
+        if end_s > len(self.audio_samples):
+            return None, None, [], [], []
+
+        slice_data = self.audio_samples[start_s:end_s]
+        window = np.hanning(len(slice_data))
+        fft_vals = np.abs(np.fft.rfft(slice_data * window))
+        freqs = np.fft.rfftfreq(len(slice_data), 1.0 / self.sample_rate)
+
+        fft_db = self.compute_fft_magnitude_db(fft_vals, len(slice_data))
+
+        # Ограничиваем отображение от 1 Гц
+        valid_mask = freqs >= 1.0
+        cur_t = sample_idx / self.sample_rate
+        active_bands = []
+
+        with self.filter_lock:
+            if self.active_filters:
+                for filt in self.active_filters:
+                    t_min, t_max = filt['t_min'], filt['t_max']
+                    if t_min is None or (t_min <= cur_t <= t_max):
+                        active_bands.append((filt['f_min'], filt['f_max']))
+
+        if isolate_on_filter and self.active_filters:
+            if active_bands:
+                band_mask = np.zeros_like(freqs, dtype=bool)
+                for f_min, f_max in active_bands:
+                    band_mask |= (freqs >= f_min) & (freqs <= f_max)
+                valid_mask = valid_mask & band_mask
+            else:
+                valid_mask = np.zeros_like(freqs, dtype=bool)
+
+        x_coords = np.log10(freqs[valid_mask]) if freq_scale_mode == "Log" else freqs[valid_mask]
+        valid_db = fft_db[valid_mask]
+
+        peak_xs, peak_ys, peak_labels = [], [], []
+
+        if active_bands:
+            for idx, (f_min, f_max) in enumerate(active_bands):
+                local_mask = (freqs >= f_min) & (freqs <= f_max)
+                if np.any(local_mask):
+                    sub_f, sub_db = freqs[local_mask], fft_db[local_mask]
+                    max_i = np.argmax(sub_db)
+                    peak_f, peak_p = sub_f[max_i], sub_db[max_i]
+                    peak_x = np.log10(peak_f) if freq_scale_mode == "Log" else peak_f
+
+                    peak_xs.append(peak_x)
+                    peak_ys.append(peak_p)
+                    peak_labels.append(f"Peak: {peak_f:.0f} Hz ({peak_p:.1f} dB)")
+        elif not self.active_filters:
+            nyq = self.sample_rate / 2.0
+            global_mask = (freqs >= 20) & (freqs <= nyq)
+            if np.any(global_mask):
+                sub_f, sub_db = freqs[global_mask], fft_db[global_mask]
+                max_i = np.argmax(sub_db)
+                peak_f = sub_f[max_i], sub_db[max_i]
+                peak_f, peak_p = sub_f[max_i], sub_db[max_i]
+                peak_x = np.log10(peak_f) if freq_scale_mode == "Log" else peak_f
+
+                peak_xs.append(peak_x)
+                peak_ys.append(peak_p)
+                peak_labels.append(f"Peak: {peak_f:.0f} Hz ({peak_p:.1f} dB)")
+
+        return x_coords, valid_db, peak_xs, peak_ys, peak_labels
 
     def init_stream(self):
         def audio_callback(outdata, frames, time_info, status):
@@ -114,8 +195,19 @@ class AudioEngine:
                         cur_t = start_idx / self.sample_rate
                         for filt in self.active_filters:
                             t_min, t_max = filt['t_min'], filt['t_max']
-                            if t_min is None or (t_min <= cur_t <= t_max):
-                                active_bands.append((int(filt['f_min']), int(filt['f_max'])))
+                            
+                            # Безопасная проверка времени 2D-бокса
+                            if t_min is not None and t_max is not None:
+                                if not (t_min <= cur_t <= t_max):
+                                    continue
+                            elif t_min is not None:
+                                if cur_t < t_min:
+                                    continue
+                            elif t_max is not None:
+                                if cur_t > t_max:
+                                    continue
+
+                            active_bands.append((float(filt['f_min']), float(filt['f_max'])))
 
                 if num_filters == 0:
                     self._filter_states.clear()
@@ -138,7 +230,8 @@ class AudioEngine:
                     if band_key not in self._filter_states:
                         try:
                             sos = self.get_bandpass_sos(f_min, f_max)
-                            zi = signal.sosfilt_zi(sos) * chunk_raw[0]
+                            first_val = float(chunk_raw[0]) if len(chunk_raw) > 0 else 0.0
+                            zi = signal.sosfilt_zi(sos) * first_val
                             self._filter_states[band_key] = {'sos': sos, 'zi': zi}
                         except Exception:
                             continue
@@ -148,6 +241,7 @@ class AudioEngine:
                     accumulated += filtered_band.astype(np.float32)
 
                 outdata[:, 0] = np.clip(accumulated * gain, -1.0, 1.0)
+
             except Exception:
                 outdata.fill(0)
 
@@ -161,11 +255,9 @@ class AudioEngine:
         self.stream.start()
 
     def compute_fft_magnitude_db(self, fft_vals, window_len: int):
-        """ЕДИНАЯ формула перевода магнитуды FFT в калиброванные dB SPL для всего проекта"""
         return 20.0 * np.log10((fft_vals / (window_len / 2.0)) + 1e-6) + self.cal_offset
 
     def get_db_at_time_and_freq(self, t_sec: float, f_hz: float) -> float:
-        """Вычисляет точный уровень громкости dB SPL в точке (t, f) по единой формуле FFT"""
         sample_idx = int(np.clip(t_sec * self.sample_rate, 0, len(self.audio_samples) - 1))
         fft_size = self.fft_size
         start_s = max(0, sample_idx - fft_size // 2)
@@ -188,106 +280,44 @@ class AudioEngine:
         return round(float(db_val), 1)
 
     def render_spectrogram_slice(self, t_start: float, t_end: float):
-        """Возвращает оригинальную плавную спектрограмму высокого качества"""
         s_idx = int(max(0.0, t_start) * self.sample_rate)
         e_idx = int(min(self.total_duration, t_end) * self.sample_rate)
         slice_audio = self.audio_samples[s_idx:e_idx]
 
         if len(slice_audio) < 128:
-            return None, 0.0, LIMIT_FREQ_MAX
+            nyq = self.sample_rate / 2.0
+            return None, 0.0, nyq
 
         span = max(0.05, t_end - t_start)
         nper = 1024 if span < 15 else 2048
         hop = max(16, len(slice_audio) // TARGET_SPEC_WIDTH)
         nov = max(0, nper - hop) if nper > hop else 0
 
-        # Исходный расчет SciPy с идеальным наложением окон
         f_spec, t_spec, Sxx = signal.spectrogram(
             slice_audio,
             fs=self.sample_rate,
             nperseg=nper,
             noverlap=nov
         )
-        mask = (f_spec >= LIMIT_FREQ_MIN) & (f_spec <= LIMIT_FREQ_MAX)
+        nyq = self.sample_rate / 2.0
+        mask = (f_spec >= LIMIT_FREQ_MIN) & (f_spec <= nyq)
         if not np.any(mask):
-            return None, LIMIT_FREQ_MIN, LIMIT_FREQ_MAX
+            return None, LIMIT_FREQ_MIN, nyq
 
-        # Учитываем половину ширины бина (df / 2), чтобы пиксели центрировались идеально точно
-        df_bin = float(f_spec[1] - f_spec[0])
-        f_min_actual = float(f_spec[mask][0]) - (df_bin / 2.0)
-        f_max_actual = float(f_spec[mask][-1]) + (df_bin / 2.0)
+        f_min_actual = float(f_spec[mask][0])
+        f_max_actual = float(f_spec[mask][-1])
 
-        # Исходная плавная логарифмическая шкала
         Sxx_db = 10 * np.log10(Sxx[mask, :] + 1e-12)
 
         return Sxx_db, f_min_actual, f_max_actual
 
-    def compute_fft_at(self, sample_idx: int, freq_scale_mode: str = "Log", isolate_on_filter: bool = False):
-        """Считает Live FFT по той же формуле amplitude_to_db_spl"""
-        start_s = max(0, sample_idx - self.fft_size // 2)
-        end_s = start_s + self.fft_size
+        df_bin = float(f_spec[1] - f_spec[0])
+        f_min_actual = float(f_spec[mask][0]) - (df_bin / 2.0)
+        f_max_actual = float(f_spec[mask][-1]) + (df_bin / 2.0)
 
-        if end_s > len(self.audio_samples):
-            return None, None, [], [], []
+        Sxx_db = 10 * np.log10(Sxx[mask, :] + 1e-12)
 
-        slice_data = self.audio_samples[start_s:end_s]
-        window = np.hanning(len(slice_data))
-        fft_vals = np.abs(np.fft.rfft(slice_data * window))
-        freqs = np.fft.rfftfreq(len(slice_data), 1.0 / self.sample_rate)
-
-        # Вызываем ту же ЕДИНУЮ функцию перевода в dB SPL
-        fft_db = self.compute_fft_magnitude_db(fft_vals, len(slice_data))
-
-        valid_mask = freqs >= LIMIT_FREQ_MIN
-        cur_t = sample_idx / self.sample_rate
-        active_bands = []
-
-        with self.filter_lock:
-            if self.active_filters:
-                for filt in self.active_filters:
-                    t_min, t_max = filt['t_min'], filt['t_max']
-                    if t_min is None or (t_min <= cur_t <= t_max):
-                        active_bands.append((filt['f_min'], filt['f_max']))
-
-        if isolate_on_filter and self.active_filters:
-            if active_bands:
-                band_mask = np.zeros_like(freqs, dtype=bool)
-                for f_min, f_max in active_bands:
-                    band_mask |= (freqs >= f_min) & (freqs <= f_max)
-                valid_mask = valid_mask & band_mask
-            else:
-                valid_mask = np.zeros_like(freqs, dtype=bool)
-
-        x_coords = np.log10(freqs[valid_mask]) if freq_scale_mode == "Log" else freqs[valid_mask]
-        valid_db = fft_db[valid_mask]
-
-        peak_xs, peak_ys, peak_labels = [], [], []
-
-        if active_bands:
-            for idx, (f_min, f_max) in enumerate(active_bands):
-                local_mask = (freqs >= f_min) & (freqs <= f_max)
-                if np.any(local_mask):
-                    sub_f, sub_db = freqs[local_mask], fft_db[local_mask]
-                    max_i = np.argmax(sub_db)
-                    peak_f, peak_p = sub_f[max_i], sub_db[max_i]
-                    peak_x = np.log10(peak_f) if freq_scale_mode == "Log" else peak_f
-
-                    peak_xs.append(peak_x)
-                    peak_ys.append(peak_p)
-                    peak_labels.append(f"Peak: {peak_f:.0f} Hz ({peak_p:.1f} dB)")
-        elif not self.active_filters:
-            global_mask = (freqs >= 50) & (freqs <= LIMIT_FREQ_MAX)
-            if np.any(global_mask):
-                sub_f, sub_db = freqs[global_mask], fft_db[global_mask]
-                max_i = np.argmax(sub_db)
-                peak_f, peak_p = sub_f[max_i], sub_db[max_i]
-                peak_x = np.log10(peak_f) if freq_scale_mode == "Log" else peak_f
-
-                peak_xs.append(peak_x)
-                peak_ys.append(peak_p)
-                peak_labels.append(f"Peak: {peak_f:.0f} Hz ({peak_p:.1f} dB)")
-
-        return x_coords, valid_db, peak_xs, peak_ys, peak_labels
+        return Sxx_db, f_min_actual, f_max_actual
 
     def close(self):
         try:

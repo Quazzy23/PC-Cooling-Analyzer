@@ -363,10 +363,11 @@ class FFTFilterViewBox(BaseInteractiveViewBox):
         super().__init__(analyzer_ref=analyzer_ref, enable_time_seek=False, is_2d_selection=False, *args, **kwargs)
 
     def get_x_limits(self):
-        f_min, f_max = AUDIO_PROFILE["limit_freq_min"], AUDIO_PROFILE["limit_freq_max"]
+        f_min = AUDIO_PROFILE["limit_freq_min"]
+        nyq = float(getattr(self.analyzer.engine, 'sample_rate', 48000) / 2.0)
         if hasattr(self.analyzer, 'freq_scale_mode') and self.analyzer.freq_scale_mode == "Log":
-            return np.log10(f_min), np.log10(f_max)
-        return f_min, f_max
+            return np.log10(f_min), np.log10(nyq)
+        return f_min, nyq
 
     def get_y_limits(self):
         ymin = float(self.analyzer.spin_ymin.value()) if hasattr(self.analyzer, 'spin_ymin') else AUDIO_PROFILE["limit_db_min"]
@@ -401,7 +402,8 @@ class SpectrogramTimelineViewBox(BaseInteractiveViewBox):
         super().__init__(analyzer_ref=analyzer_ref, enable_time_seek=True, is_2d_selection=True, *args, **kwargs)
 
     def get_y_limits(self):
-        return AUDIO_PROFILE["limit_freq_min"], AUDIO_PROFILE["limit_freq_max"]
+        nyq = float(getattr(self.analyzer.engine, 'sample_rate', 48000) / 2.0)
+        return AUDIO_PROFILE["limit_freq_min"], nyq
 
     def get_status_telemetry(self, view_pos, scene_pos):
         t_mouse = max(0.0, min(self.analyzer.total_duration, view_pos.x()))
