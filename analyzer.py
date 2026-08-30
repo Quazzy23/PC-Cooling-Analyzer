@@ -60,7 +60,7 @@ class CleanTimeViewBox(pg.ViewBox):
             ev.ignore()
 
     def mousePressEvent(self, ev):
-        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+        if ev.button() in (QtCore.Qt.MouseButton.MiddleButton, QtCore.Qt.MouseButton.LeftButton):
             ev.accept()
             self.analyzer.panning_data = {
                 'start_pos': ev.scenePos(),
@@ -71,7 +71,7 @@ class CleanTimeViewBox(pg.ViewBox):
             super().mousePressEvent(ev)
 
     def mouseReleaseEvent(self, ev):
-        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+        if ev.button() in (QtCore.Qt.MouseButton.MiddleButton, QtCore.Qt.MouseButton.LeftButton):
             ev.accept()
             self.analyzer.panning_data = None
         else:

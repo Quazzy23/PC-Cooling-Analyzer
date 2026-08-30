@@ -62,17 +62,18 @@ class CleanLogFrequencyAxis(pg.AxisItem):
                 strings.append(f"{hz:.0f}")
         return strings
 
-# 1. Верхний ViewBox FFT: ПКМ = Выделение частот, СКМ = Сброс
+# 1. Верхний ViewBox FFT
 class FFTFilterViewBox(pg.ViewBox):
     def __init__(self, analyzer_ref, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.analyzer = analyzer_ref
         self.temp_region = None
+        self.panning_data = None
         self.setMouseMode(pg.ViewBox.RectMode)
 
     def mouseClickEvent(self, ev):
-        # Клик колесиком (СКМ) -> Точечное или полное удаление
-        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+        # Одиночный клик ПКМ -> удаление фильтра под курсором или сброс всех
+        if ev.button() == QtCore.Qt.MouseButton.RightButton:
             pos = self.mapToView(ev.pos())
             x_val = pos.x()
             f_click = (10.0 ** x_val) if self.analyzer.freq_scale_mode == "Log" else x_val
@@ -81,8 +82,50 @@ class FFTFilterViewBox(pg.ViewBox):
         else:
             ev.accept()
 
+    def mousePressEvent(self, ev):
+        # Нажатие СКМ (Колесико) -> начало панорамирования
+        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+            ev.accept()
+            self.panning_data = {
+                'start_pos': ev.scenePos(),
+                'start_x_range': self.viewRange()[0],
+                'start_y_range': self.viewRange()[1]
+            }
+        else:
+            super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+            ev.accept()
+            self.panning_data = None
+        else:
+            super().mouseReleaseEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self.panning_data is not None:
+            ev.accept()
+            delta = ev.scenePos() - self.panning_data['start_pos']
+            
+            # Pan по X (Частоты) с сохранением точного span_x
+            vr_x = self.panning_data['start_x_range']
+            span_x = vr_x[1] - vr_x[0]
+            dx = -delta.x() / max(1, self.width()) * span_x
+            new_min_x = vr_x[0] + dx
+            self.setXRange(new_min_x, new_min_x + span_x, padding=0)
+
+            # Pan по Y (dB) с сохранением точного span_y
+            vr_y = self.panning_data['start_y_range']
+            span_y = vr_y[1] - vr_y[0]
+            dy = (delta.y() / max(1, self.height())) * span_y
+            new_min_y = vr_y[0] + dy
+            self.setYRange(new_min_y, new_min_y + span_y, padding=0)
+
+            self.clamp_view()
+        else:
+            super().mouseMoveEvent(ev)
+
     def mouseDragEvent(self, ev, axis=None):
-        # ПКМ (Правая кнопка) -> Рисование частотной полосы
+        # ПКМ + Drag -> Рисование частотной полосы
         if ev.button() == QtCore.Qt.MouseButton.RightButton:
             ev.accept()
             modifiers = QtWidgets.QApplication.keyboardModifiers()
@@ -126,10 +169,8 @@ class FFTFilterViewBox(pg.ViewBox):
 
         is_alt   = bool(modifiers & QtCore.Qt.KeyboardModifier.AltModifier)
         is_shift = bool(modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier)
-        is_ctrl  = bool(modifiers & QtCore.Qt.KeyboardModifier.ControlModifier)
 
-        SCROLL_SPEED_X = 0.02
-        SCROLL_SPEED_Y = 0.04
+        SCROLL_SPEED_X = 0.04
 
         # 1. ALT + Wheel -> Зум частот (X)
         if is_alt:
@@ -145,23 +186,7 @@ class FFTFilterViewBox(pg.ViewBox):
             self.clamp_view()
             ev.accept()
 
-        # 3. CTRL + Wheel -> Скролл Вверх / Вниз (dB)
-        elif is_ctrl:
-            y_range = self.viewRange()[1]
-            span_y = y_range[1] - y_range[0]
-            shift_y = span_y * SCROLL_SPEED_Y * (1 if delta > 0 else -1)
-            b_min = float(self.analyzer.spin_ymin.value())
-            b_max = float(self.analyzer.spin_ymax.value())
-            new_ymin = max(b_min, y_range[0] + shift_y)
-            new_ymax = min(b_max, new_ymin + span_y)
-            if new_ymax >= b_max:
-                new_ymax = b_max
-                new_ymin = max(b_min, b_max - span_y)
-            self.setYRange(new_ymin, new_ymax, padding=0)
-            self.clamp_view()
-            ev.accept()
-
-        # 4. Просто колесико -> Скролл Влево / Вправо (Частоты)
+        # 3. Просто колесико -> Скролл Влево / Вправо (Частоты)
         else:
             x_range = self.viewRange()[0]
             span_x = x_range[1] - x_range[0]
@@ -182,26 +207,42 @@ class FFTFilterViewBox(pg.ViewBox):
     def clamp_view(self):
         x_range = self.viewRange()[0]
         y_range = self.viewRange()[1]
+        span_x = x_range[1] - x_range[0]
+        span_y = y_range[1] - y_range[0]
 
+        # Лимиты X
         if self.analyzer.freq_scale_mode == "Log":
-            min_x = np.log10(LIMIT_FREQ_MIN)
-            max_x = np.log10(LIMIT_FREQ_MAX)
+            min_x, max_x = np.log10(LIMIT_FREQ_MIN), np.log10(LIMIT_FREQ_MAX)
         else:
-            min_x = LIMIT_FREQ_MIN
-            max_x = LIMIT_FREQ_MAX
+            min_x, max_x = LIMIT_FREQ_MIN, LIMIT_FREQ_MAX
 
-        clamped_xmin = max(min_x, x_range[0])
-        clamped_xmax = min(max_x, max(clamped_xmin + 0.05, x_range[1]))
+        total_x = max_x - min_x
+        if span_x >= total_x:
+            clamped_xmin, clamped_xmax = min_x, max_x
+        else:
+            clamped_xmin = max(min_x, x_range[0])
+            clamped_xmax = clamped_xmin + span_x
+            if clamped_xmax >= max_x:
+                clamped_xmax = max_x
+                clamped_xmin = max(min_x, max_x - span_x)
 
+        # Лимиты Y
         bound_ymin = float(self.analyzer.spin_ymin.value())
         bound_ymax = float(self.analyzer.spin_ymax.value())
+        total_y = bound_ymax - bound_ymin
 
-        clamped_ymin = max(bound_ymin, y_range[0])
-        clamped_ymax = min(bound_ymax, max(clamped_ymin + 2.0, y_range[1]))
+        if span_y >= total_y:
+            clamped_ymin, clamped_ymax = bound_ymin, bound_ymax
+        else:
+            clamped_ymin = max(bound_ymin, y_range[0])
+            clamped_ymax = clamped_ymin + span_y
+            if clamped_ymax >= bound_ymax:
+                clamped_ymax = bound_ymax
+                clamped_ymin = max(bound_ymin, bound_ymax - span_y)
 
         self.setRange(xRange=[clamped_xmin, clamped_xmax], yRange=[clamped_ymin, clamped_ymax], padding=0)
 
-# 2. Нижний ViewBox Спектрограммы: ЛКМ = Курсор, ПКМ = Рисование 2D областей, СКМ = Сброс
+# 2. Нижний ViewBox Спектрограммы
 class SpectrogramTimelineViewBox(pg.ViewBox):
     def __init__(self, analyzer_ref, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -209,10 +250,11 @@ class SpectrogramTimelineViewBox(pg.ViewBox):
         self.setMouseMode(pg.ViewBox.RectMode)
         self.drag_start = None
         self.temp_box_item = None
+        self.panning_data = None
 
     def mouseClickEvent(self, ev):
-        # Клик колесиком (СКМ) -> Точечное или полное удаление
-        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+        # Клик ПКМ -> Точечное удаление фильтра или полный сброс
+        if ev.button() == QtCore.Qt.MouseButton.RightButton:
             pos = self.mapToView(ev.pos())
             self.analyzer.remove_filter_at_pos(t_click=pos.x(), f_click=pos.y(), is_fft=False)
             ev.accept()
@@ -225,8 +267,50 @@ class SpectrogramTimelineViewBox(pg.ViewBox):
         else:
             ev.accept()
 
+    def mousePressEvent(self, ev):
+        # Нажатие СКМ (Колесико) -> начало панорамирования
+        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+            ev.accept()
+            self.panning_data = {
+                'start_pos': ev.scenePos(),
+                'start_x_range': self.viewRange()[0],
+                'start_y_range': self.viewRange()[1]
+            }
+        else:
+            super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+            ev.accept()
+            self.panning_data = None
+        else:
+            super().mouseReleaseEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self.panning_data is not None:
+            ev.accept()
+            delta = ev.scenePos() - self.panning_data['start_pos']
+            
+            # Pan по X (Время) с сохранением точного span_x
+            vr_x = self.panning_data['start_x_range']
+            span_x = vr_x[1] - vr_x[0]
+            dx = -delta.x() / max(1, self.width()) * span_x
+            new_min_x = vr_x[0] + dx
+            self.setXRange(new_min_x, new_min_x + span_x, padding=0)
+
+            # Pan по Y (Частоты) с сохранением точного span_y
+            vr_y = self.panning_data['start_y_range']
+            span_y = vr_y[1] - vr_y[0]
+            dy = (delta.y() / max(1, self.height())) * span_y
+            new_min_y = vr_y[0] + dy
+            self.setYRange(new_min_y, new_min_y + span_y, padding=0)
+
+            self.clamp_view()
+        else:
+            super().mouseMoveEvent(ev)
+
     def mouseDragEvent(self, ev, axis=None):
-        # 1. ЛКМ -> Перемещение и скраббинг курсора времени
+        # 1. ЛКМ -> Скраббинг курсора времени
         if ev.button() == QtCore.Qt.MouseButton.LeftButton:
             ev.accept()
             mouse_pos = self.mapToView(ev.pos())
@@ -245,8 +329,8 @@ class SpectrogramTimelineViewBox(pg.ViewBox):
                     self.analyzer.clear_all_filters()
 
                 self.temp_box_item = QtWidgets.QGraphicsRectItem()
-                self.temp_box_item.setPen(QtGui.QPen(QtCore.Qt.PenStyle.NoPen)) # Без контура
-                self.temp_box_item.setBrush(pg.mkBrush(255, 255, 255, 120))     # Белый 50%
+                self.temp_box_item.setPen(QtGui.QPen(QtCore.Qt.PenStyle.NoPen))
+                self.temp_box_item.setBrush(pg.mkBrush(255, 255, 255, 120))
                 self.temp_box_item.setZValue(15)
                 self.addItem(self.temp_box_item, ignoreBounds=True)
 
@@ -279,10 +363,8 @@ class SpectrogramTimelineViewBox(pg.ViewBox):
 
         is_alt   = bool(modifiers & QtCore.Qt.KeyboardModifier.AltModifier)
         is_shift = bool(modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier)
-        is_ctrl  = bool(modifiers & QtCore.Qt.KeyboardModifier.ControlModifier)
 
-        SCROLL_SPEED_X = 0.02
-        SCROLL_SPEED_Y = 0.04
+        SCROLL_SPEED_X = 0.04
 
         # 1. ALT + Wheel -> Зум времени X
         if is_alt:
@@ -298,28 +380,7 @@ class SpectrogramTimelineViewBox(pg.ViewBox):
             self.clamp_view()
             ev.accept()
 
-        # 3. CTRL + Wheel -> Скролл Вверх / Вниз по частотам (Y)
-        elif is_ctrl:
-            y_range = self.viewRange()[1]
-            span_y = y_range[1] - y_range[0]
-
-            if span_y < (LIMIT_FREQ_MAX - LIMIT_FREQ_MIN - 10):
-                shift_y = span_y * SCROLL_SPEED_Y * (1 if delta > 0 else -1)
-                new_ymin = y_range[0] + shift_y
-                new_ymax = y_range[1] + shift_y
-
-                if new_ymin < LIMIT_FREQ_MIN:
-                    new_ymin = LIMIT_FREQ_MIN
-                    new_ymax = LIMIT_FREQ_MIN + span_y
-                elif new_ymax > LIMIT_FREQ_MAX:
-                    new_ymax = LIMIT_FREQ_MAX
-                    new_ymin = max(LIMIT_FREQ_MIN, LIMIT_FREQ_MAX - span_y)
-
-                self.setYRange(new_ymin, new_ymax, padding=0)
-                self.clamp_view()
-            ev.accept()
-
-        # 4. Просто Колесико -> Скролл Влево / Вправо по времени (X)
+        # 3. Просто Колесико -> Скролл Влево / Вправо по времени (X)
         else:
             x_range = self.viewRange()[0]
             span_x = x_range[1] - x_range[0]
@@ -343,12 +404,33 @@ class SpectrogramTimelineViewBox(pg.ViewBox):
     def clamp_view(self):
         x_range = self.viewRange()[0]
         y_range = self.viewRange()[1]
-        clamped_xmin = max(0.0, x_range[0])
-        clamped_xmax = min(self.analyzer.total_duration, max(clamped_xmin + 0.01, x_range[1]))
-        clamped_ymin = max(LIMIT_FREQ_MIN, y_range[0])
-        clamped_ymax = min(LIMIT_FREQ_MAX, max(clamped_ymin + 100, y_range[1]))
-        self.setRange(xRange=[clamped_xmin, clamped_xmax], yRange=[clamped_ymin, clamped_ymax], padding=0)
+        span_x = x_range[1] - x_range[0]
+        span_y = y_range[1] - y_range[0]
 
+        # Лимиты X (Время)
+        t_max = self.analyzer.total_duration
+        if span_x >= t_max:
+            clamped_xmin, clamped_xmax = 0.0, t_max
+        else:
+            clamped_xmin = max(0.0, x_range[0])
+            clamped_xmax = clamped_xmin + span_x
+            if clamped_xmax >= t_max:
+                clamped_xmax = t_max
+                clamped_xmin = max(0.0, t_max - span_x)
+
+        # Лимиты Y (Частоты)
+        total_freq = LIMIT_FREQ_MAX - LIMIT_FREQ_MIN
+        if span_y >= total_freq:
+            clamped_ymin, clamped_ymax = LIMIT_FREQ_MIN, LIMIT_FREQ_MAX
+        else:
+            clamped_ymin = max(LIMIT_FREQ_MIN, y_range[0])
+            clamped_ymax = clamped_ymin + span_y
+            if clamped_ymax >= LIMIT_FREQ_MAX:
+                clamped_ymax = LIMIT_FREQ_MAX
+                clamped_ymin = max(LIMIT_FREQ_MIN, LIMIT_FREQ_MAX - span_y)
+
+        self.setRange(xRange=[clamped_xmin, clamped_xmax], yRange=[clamped_ymin, clamped_ymax], padding=0)
+        
 class AudioAnalyzerPro(QtWidgets.QMainWindow):
     def __init__(self, audio_path):
         super().__init__()
@@ -631,7 +713,7 @@ class AudioAnalyzerPro(QtWidgets.QMainWindow):
 
         controls_layout.addStretch()
 
-        lbl_hint = QtWidgets.QLabel("Controls: [Left Click/Drag] Seek Time | [Right Drag] Select Area | [Ctrl+Right Drag] Multi-Area | [Wheel Click / Esc] Clear | [Space] Play")
+        lbl_hint = QtWidgets.QLabel("Controls: [Left Click] Seek | [Middle Drag] Pan | [Alt+Wheel] Zoom X | [Shift+Wheel] Zoom Y | [Right Drag] Select | [Ctrl+Right Drag] Multi | [Right Click / Esc] Clear | [Space] Play")
         lbl_hint.setStyleSheet("color: #888888; font-style: italic;")
         controls_layout.addWidget(lbl_hint)
 
