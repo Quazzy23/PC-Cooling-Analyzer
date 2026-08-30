@@ -16,7 +16,7 @@ A high-performance, modular hardware telemetry and acoustic spectral analysis su
 
 *   **Synchronized Logging:** Captures all hardware sensors at 4 Hz via LibreHardwareMonitor alongside continuous calibrated noise recording (dBA).
 *   **Hardware Visualizer (`analyzer.py`):** Interactive dual-panel time series for thermal and cooling dynamics with live on-curve values, custom time region statistics, and 1-click layout persistence.
-*   **Spectral Audio DAW (`audio_analyzer.py`):** Real-time FFT acoustic spectrum (20 Hz – 20 kHz) and high-resolution 2D spectrogram with interactive bandpass filtering.
+*   **Spectral Audio DAW (`audio_analyzer.py`):** Real-time FFT acoustic spectrum and high-resolution 2D spectrogram with interactive bandpass filtering.
 *   **Unified Controls:** Standardized mouse navigation across both visualizers (pan, zoom, timeline scrub, and region selection).
 *   **Modular Architecture:** Clean separation between core math engines, graphics rendering, and hardware utilities.
 

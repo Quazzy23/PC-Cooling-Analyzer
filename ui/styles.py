@@ -268,3 +268,32 @@ SLIDER_CYAN_QSS = """
         background: #00E5FF;
     }
 """
+
+# Стиль выпадающего списка (QComboBox)
+COMBOBOX_CLEAN_QSS = """
+    QComboBox {
+        background-color: #1A1A1A;
+        color: #00E5FF;
+        font-weight: bold;
+        font-size: 9pt;
+        border: 1px solid #333333;
+        border-radius: 4px;
+        padding-left: 8px;
+        padding-right: 8px;
+        min-height: 28px;
+    }
+    QComboBox:hover {
+        border: 1px solid #00E5FF;
+    }
+    QComboBox::drop-down {
+        border: none;
+        width: 20px;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #141414;
+        color: #FFFFFF;
+        selection-background-color: #222222;
+        selection-color: #00E5FF;
+        border: 1px solid #333333;
+    }
+"""

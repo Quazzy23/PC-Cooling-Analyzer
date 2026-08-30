@@ -1,33 +1,29 @@
 """
 Интерактивный визуализатор аппаратной телеметрии (PyQt6 + PyQtGraph)
+с динамическим переключением профилей (CPU / GPU / ALL) и авто-сохранением вида
 """
 import os
 import sys
-sys.dont_write_bytecode = True
 import json
 import numpy as np
 import pandas as pd
 from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from core.defaults import load_sensor_profile, save_user_view_state, load_user_view_state
+from core.defaults import (
+    load_sensor_profile, get_available_profiles,
+    save_all_session_view_states, load_user_view_state, load_last_active_mode
+)
 from core.telemetry_engine import TelemetryEngine
 from ui.viewboxes import CleanTimeViewBox, OverlayViewBox
 from ui.styles import (
     apply_pg_dark_theme, create_pen, create_timeline_cursor, create_value_tag,
     SPINBOX_CLEAN_QSS, BTN_CYAN_QSS, BTN_GREEN_QSS, TABLE_SUMMARY_QSS,
-    BTN_SIDE_QSS, get_sensor_checkbox_qss, get_move_btn_qss
+    BTN_SIDE_QSS, COMBOBOX_CLEAN_QSS, get_sensor_checkbox_qss, get_move_btn_qss
 )
-
-# =======================================================
-#               MODE & DIRECTORY CONFIGURATION
-# =======================================================
-ANALYSIS_MODE = "CPU"  # "CPU", "GPU" или None (брать active_mode из sensors_config.json)
-PROFILE = load_sensor_profile(ANALYSIS_MODE)
 
 RESULTS_DIR = "results"
 LOGS_DIR = os.path.join(RESULTS_DIR, "sensors_logs")
-SUMMARY_DIR = os.path.join(RESULTS_DIR, "summary_reports", PROFILE["summary_dir_name"])
 HW_INFO_FILE = os.path.join("system_info", "hardware_info.json")
 
 DEFAULT_SMOOTHING = 4
@@ -36,7 +32,6 @@ DEFAULT_TREND_ALPHA = 0.0
 TIME_START = 0
 TIME_END = "last"
 ID_TIME = "TIME_SEC"
-# =======================================================
 
 apply_pg_dark_theme()
 
@@ -47,14 +42,14 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.df = df
         self.selected_file = selected_file
         self.hw_model_name = hw_model_name
-
         self.clean_file_name = selected_file.replace("table_raw_", "")
-        self.chart_filename = f"graph_{self.clean_file_name.replace('.csv', '.jpg')}"
-        self.chart_filepath = os.path.join(SUMMARY_DIR, self.chart_filename)
-        self.summary_filename = f"table_{self.clean_file_name}"
-        self.summary_filepath = os.path.join(SUMMARY_DIR, self.summary_filename)
 
-        self.setWindowTitle(f"{PROFILE['mode_name']} Cooling Analysis — {self.clean_file_name} ({hw_model_name})")
+        # Загружаем последний активный профиль (CPU, GPU или ALL)
+        self.current_mode = load_last_active_mode()
+        self.profile = load_sensor_profile(self.current_mode)
+        self.update_report_paths()
+
+        self.setWindowTitle(f"{self.profile['mode_name']} Cooling Analysis — {self.clean_file_name} ({hw_model_name})")
         self.resize(1580, 930)
 
         # Состояние
@@ -64,10 +59,13 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.y_fit_mode = "Raw"
         self.current_time_cursor = 0.0
 
+        # Сессионный кэш профилей (сохраняет выбор в памяти при переключениях)
+        self.session_view_states = {}
+
         # Реестры управления
-        self.sensor_sides = {}       # key -> "left" / "right"
-        self.sensor_move_active = {} # key -> bool (кнопка M)
-        self.sensor_y_limits = {}    # key -> [min_y, max_y]
+        self.sensor_sides = {}       
+        self.sensor_move_active = {} 
+        self.sensor_y_limits = {}    
         self.panning_data = None
         self.curves = {}
         self._persistent_curves = []
@@ -82,11 +80,20 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
 
         self.resolve_sensors()
         self.init_ui()
-        self.populate_summary_table()
+        # Выставляем отображение всей длительности лога от 0 до конца
+        self.vb1.setXRange(0.0, self.total_duration, padding=0)
         self.apply_saved_or_default_view()
+        self.populate_summary_table()
         self.update_plots_data()
         self.update_y_limits()
         self.seek_to_time(0.0)
+
+    def update_report_paths(self):
+        self.summary_dir = os.path.join(RESULTS_DIR, "summary_reports", self.profile["summary_dir_name"])
+        self.chart_filename = f"graph_{self.clean_file_name.replace('.csv', '.jpg')}"
+        self.chart_filepath = os.path.join(self.summary_dir, self.chart_filename)
+        self.summary_filename = f"table_{self.clean_file_name}"
+        self.summary_filepath = os.path.join(self.summary_dir, self.summary_filename)
 
     def resolve_sensors(self):
         self.col_time = TelemetryEngine.find_column_by_sensor_id(self.df, ID_TIME) or self.df.columns[0]
@@ -95,13 +102,13 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.total_duration = float(self.time_data[-1])
 
         self.p1_sensors = []
-        for s in PROFILE.get("panel1_sensors", []):
+        for s in self.profile.get("panel1_sensors", []):
             col = TelemetryEngine.find_column_by_sensor_id(self.df, s["id"])
             if col is not None:
                 self.p1_sensors.append({**s, "col": col})
 
         self.p2_sensors = []
-        for s in PROFILE.get("panel2_sensors", []):
+        for s in self.profile.get("panel2_sensors", []):
             col = TelemetryEngine.find_column_by_sensor_id(self.df, s["id"])
             if col is not None:
                 self.p2_sensors.append({**s, "col": col})
@@ -124,23 +131,46 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         ax_right.linkToView(vb)
         plot_widget.plotItem.scene().addItem(ax_right)
 
-        if default_side == 'left':
-            ax_left.setVisible(True)
-            ax_right.setVisible(False)
-        else:
-            ax_left.setVisible(False)
-            ax_right.setVisible(True)
+        ax_left.setVisible(default_side == 'left')
+        ax_right.setVisible(default_side == 'right')
 
         def sync_views():
             rect = plot_widget.plotItem.vb.sceneBoundingRect()
-            vb.setGeometry(rect)
-            vb.setXRange(*plot_widget.plotItem.vb.viewRange()[0], padding=0)
-            ax_left.setGeometry(QtCore.QRectF(rect.left() - 50, rect.top(), 50, rect.height()))
-            ax_right.setGeometry(QtCore.QRectF(rect.right(), rect.top(), 50, rect.height()))
+            if rect.width() > 1 and rect.height() > 1:
+                vb.setGeometry(rect)
+                vb.setXRange(*plot_widget.plotItem.vb.viewRange()[0], padding=0)
+                ax_left.setGeometry(QtCore.QRectF(rect.left() - 50, rect.top(), 50, rect.height()))
+                ax_right.setGeometry(QtCore.QRectF(rect.right(), rect.top(), 50, rect.height()))
 
         plot_widget.plotItem.vb.sigResized.connect(sync_views)
         plot_widget.plotItem.vb.sigRangeChanged.connect(sync_views)
+        sync_views()
         return vb, ax_left, ax_right
+
+    def sync_all_overlay_views(self):
+        """Принудительно расправляет все оверлейные графики и оси по всему окну"""
+        for p_plot, sensors in [(self.p1_plot, self.p1_sensors), (self.p2_plot, self.p2_sensors)]:
+            rect = p_plot.plotItem.vb.sceneBoundingRect()
+            if rect.width() <= 1 or rect.height() <= 1:
+                continue
+            vr_x = p_plot.plotItem.vb.viewRange()[0]
+            for s in sensors:
+                k = s["key"]
+                if k in self.viewboxes_map:
+                    vb = self.viewboxes_map[k]
+                    vb.setGeometry(rect)
+                    vb.setXRange(vr_x[0], vr_x[1], padding=0)
+                if k in self.axes_map:
+                    ax_l = self.axes_map[k]['left']
+                    ax_r = self.axes_map[k]['right']
+                    ax_l.setGeometry(QtCore.QRectF(rect.left() - 50, rect.top(), 50, rect.height()))
+                    ax_r.setGeometry(QtCore.QRectF(rect.right(), rect.top(), 50, rect.height()))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Гарантированно расправляем геометрию осей через 30мс после открытия окна
+        QtCore.QTimer.singleShot(30, self.sync_all_overlay_views)
+        QtCore.QTimer.singleShot(30, self.update_y_limits)
 
     def create_telemetry_plot(self, title_html: str, show_bottom_label: bool = False):
         vb = CleanTimeViewBox(self)
@@ -179,6 +209,8 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
 
             c_raw = pg.PlotCurveItem(self.time_data, smoothed, pen=pen_raw)
             c_trend = pg.PlotCurveItem(self.time_data, smoothed, pen=pen_trend)
+            c_raw.setVisible(False)
+            c_trend.setVisible(False)
 
             self.curves[f"{k}_raw"] = c_raw
             self.curves[f"{k}_trend"] = c_trend
@@ -187,6 +219,7 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
             vb.addItem(c_trend)
 
             tag = create_value_tag(s['color'])
+            tag.setVisible(False)
             vb.addItem(tag)
             self.intersection_tags[k] = tag
 
@@ -202,14 +235,14 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         graphs_layout.setContentsMargins(0, 0, 0, 0)
         graphs_layout.setSpacing(10)
 
-        # 1. Верхний график: Теплофизика (P1)
-        p1_title = f"<span style='color: #FFFFFF; font-size: 11pt;'><b>1. {PROFILE['chart_title_prefix']} ({self.hw_model_name} — {self.clean_file_name})</b></span>"
+        # 1. Верхний график (P1)
+        p1_title = f"<span style='color: #FFFFFF; font-size: 11pt;'><b>1. {self.profile['chart_title_prefix']} ({self.hw_model_name} — {self.clean_file_name})</b></span>"
         self.p1_plot, self.vb1, self.cursor_line_p1 = self.create_telemetry_plot(p1_title)
         self.setup_sensors_for_plot(self.p1_sensors, self.p1_plot)
         graphs_layout.addWidget(self.p1_plot, stretch=5)
 
-        # 2. Нижний график: Обороты и Шум (P2)
-        p2_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>2. {PROFILE['panel2_title']}</b></span>"
+        # 2. Нижний график (P2)
+        p2_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>2. {self.profile['panel2_title']}</b></span>"
         self.p2_plot, self.vb2, self.cursor_line_p2 = self.create_telemetry_plot(p2_title, show_bottom_label=True)
         self.vb2.setXLink(self.vb1)
         self.setup_sensors_for_plot(self.p2_sensors, self.p2_plot)
@@ -294,15 +327,35 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
 
         graphs_layout.addLayout(controls_layout)
 
-        # 4. Боковая панель: Таблица + Паспорт датчиков + Сохранение вида
+        # 4. Сайдбар: Выбор профиля + Таблица + Паспорт датчиков
         sidebar = QtWidgets.QFrame()
         sidebar.setFixedWidth(380)
         sidebar.setStyleSheet("background-color: #121212; border: 1px solid #2A2A2A; border-radius: 6px; padding: 6px;")
         sb_layout = QtWidgets.QVBoxLayout(sidebar)
-        sb_layout.setContentsMargins(6, 6, 6, 6)
+        sb_layout.setContentsMargins(8, 8, 8, 8)
         sb_layout.setSpacing(8)
 
-        self.lbl_summary_title = QtWidgets.QLabel(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({PROFILE['mode_name']})</span>")
+        # Блок выбора профиля (CPU / GPU / ALL)
+        row_prof = QtWidgets.QHBoxLayout()
+        lbl_prof = QtWidgets.QLabel("<b>PROFILE:</b>")
+        lbl_prof.setStyleSheet("color: #00E5FF; font-size: 9pt;")
+        row_prof.addWidget(lbl_prof)
+
+        self.combo_profile = QtWidgets.QComboBox()
+        self.combo_profile.setStyleSheet(COMBOBOX_CLEAN_QSS)
+        available_modes = get_available_profiles()
+        self.combo_profile.addItems(available_modes)
+
+        # Выставляем текущий активный профиль
+        curr_idx = self.combo_profile.findText(self.profile["mode_name"])
+        if curr_idx >= 0:
+            self.combo_profile.setCurrentIndex(curr_idx)
+
+        self.combo_profile.currentTextChanged.connect(self.on_profile_switched)
+        row_prof.addWidget(self.combo_profile, stretch=1)
+        sb_layout.addLayout(row_prof)
+
+        self.lbl_summary_title = QtWidgets.QLabel(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({self.profile['mode_name']})</span>")
         self.lbl_summary_title.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
         sb_layout.addWidget(self.lbl_summary_title)
 
@@ -337,28 +390,37 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         passport_scroll.setWidgetResizable(True)
         passport_scroll.setStyleSheet("background: transparent; border: none;")
         
-        passport_widget = QtWidgets.QWidget()
-        self.passport_layout = QtWidgets.QVBoxLayout(passport_widget)
+        self.passport_widget = QtWidgets.QWidget()
+        self.passport_layout = QtWidgets.QVBoxLayout(self.passport_widget)
         self.passport_layout.setContentsMargins(0, 0, 0, 0)
         self.passport_layout.setSpacing(3)
 
-        for s in self.p1_sensors + self.p2_sensors:
-            self.add_passport_row(s)
+        self.populate_passport_rows()
 
-        self.passport_layout.addStretch()
-        passport_scroll.setWidget(passport_widget)
+        passport_scroll.setWidget(self.passport_widget)
         sb_layout.addWidget(passport_scroll, stretch=5)
 
-        # Кнопка сохранения текущего вида
+        # Кнопка сохранения пресета вида
         self.btn_save_view = QtWidgets.QPushButton("Save View Preset")
         self.btn_save_view.setFixedHeight(30)
-        self.btn_save_view.setToolTip("Saves current visibility, axis side and zoom M-state to view_state.json")
+        self.btn_save_view.setToolTip("Saves current visibility, axis side and zoom M-state for active profile")
         self.btn_save_view.setStyleSheet(BTN_CYAN_QSS)
         self.btn_save_view.clicked.connect(self.save_view_preset_action)
         sb_layout.addWidget(self.btn_save_view)
 
         self.main_layout.addWidget(graphs_container, stretch=7)
         self.main_layout.addWidget(sidebar, stretch=3)
+
+    def populate_passport_rows(self):
+        # Очищаем старые строки паспорта
+        while self.passport_layout.count():
+            item = self.passport_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for s in self.p1_sensors + self.p2_sensors:
+            self.add_passport_row(s)
+        self.passport_layout.addStretch()
 
     def add_passport_row(self, s):
         k = s["key"]
@@ -368,10 +430,9 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         row_layout.setSpacing(4)
         row_widget.setFixedHeight(24)
 
-        is_default_vis = s.get("visible", False)
         cb = QtWidgets.QCheckBox(s['label'])
         cb.blockSignals(True)
-        cb.setChecked(is_default_vis)
+        cb.setChecked(False)
         cb.blockSignals(False)
         cb.setStyleSheet(get_sensor_checkbox_qss(s['color']))
         cb.toggled.connect(lambda checked, key=k: self.toggle_curve_visibility(key, checked))
@@ -398,6 +459,76 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.move_buttons[k] = btn_move
 
         self.passport_layout.addWidget(row_widget)
+
+    def on_profile_switched(self, new_mode: str):
+        """Мгновенно переключает профиль (CPU / GPU / ALL) на лету без перезапуска"""
+        if not new_mode or new_mode == self.current_mode:
+            return
+
+        # Запоминаем состояние уходящего профиля в памяти сессии
+        current_state = {}
+        for s in self.p1_sensors + self.p2_sensors:
+            k = s["key"]
+            sid = s["id"]
+            current_state[sid] = {
+                "visible": self.sensor_checkboxes[k].isChecked() if k in self.sensor_checkboxes else False,
+                "axis": self.sensor_sides.get(k, "left"),
+                "move": self.sensor_move_active.get(k, False)
+            }
+        self.session_view_states[self.current_mode] = current_state
+
+        self.current_mode = new_mode
+        self.profile = load_sensor_profile(self.current_mode)
+        self.update_report_paths()
+
+        # Обновляем заголовки
+        self.setWindowTitle(f"{self.profile['mode_name']} Cooling Analysis — {self.clean_file_name} ({self.hw_model_name})")
+        p1_title = f"<span style='color: #FFFFFF; font-size: 11pt;'><b>1. {self.profile['chart_title_prefix']} ({self.hw_model_name} — {self.clean_file_name})</b></span>"
+        self.p1_plot.setTitle(p1_title, justify='left')
+        p2_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>2. {self.profile['panel2_title']}</b></span>"
+        self.p2_plot.setTitle(p2_title, justify='left')
+
+        # Корректно и безопасно удаляем элементы строго из их родной сцены
+        for k, vb in list(self.viewboxes_map.items()):
+            if vb.scene() is not None:
+                vb.scene().removeItem(vb)
+
+        for k, axes in list(self.axes_map.items()):
+            for ax in axes.values():
+                if ax.scene() is not None:
+                    ax.scene().removeItem(ax)
+
+        for k, tag in list(self.intersection_tags.items()):
+            if tag.scene() is not None:
+                tag.scene().removeItem(tag)
+
+        # Сбрасываем реестры
+        self.sensor_sides.clear()
+        self.sensor_move_active.clear()
+        self.sensor_y_limits.clear()
+        self.curves.clear()
+        self._persistent_curves.clear()
+        self.axes_map.clear()
+        self.viewboxes_map.clear()
+        self.plot_map.clear()
+        self.sensor_checkboxes.clear()
+        self.side_buttons.clear()
+        self.move_buttons.clear()
+        self.intersection_tags.clear()
+
+        # Пересобираем датчики для нового профиля
+        self.resolve_sensors()
+        self.setup_sensors_for_plot(self.p1_sensors, self.p1_plot)
+        self.setup_sensors_for_plot(self.p2_sensors, self.p2_plot)
+        self.populate_passport_rows()
+
+        # Применяем сохраненный пресет для этого режима
+        self.apply_saved_or_default_view()
+        self.populate_summary_table()
+        self.update_plots_data()
+        self.sync_all_overlay_views()
+        self.update_y_limits()
+        self.seek_to_time(self.current_time_cursor)
 
     def toggle_axis_side(self, key, btn, force_side=None):
         if key not in self.axes_map: return
@@ -470,26 +601,34 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.seek_to_time(self.current_time_cursor)
 
     def save_view_preset_action(self):
-        """Сохраняет текущий вид (чекбоксы, оси L/R, кнопки M) в view_state.json"""
-        state_dict = {}
+        """Сохраняет состояние всех настроенных в сессии профилей (CPU, GPU, ALL) на диск"""
+        # 1. Фиксируем состояние текущего открытого профиля в памяти сессии
+        current_state = {}
         all_sensors = self.p1_sensors + self.p2_sensors
         for s in all_sensors:
             k = s["key"]
             sid = s["id"]
-            state_dict[sid] = {
-                "visible": self.sensor_checkboxes[k].isChecked() if k in self.sensor_checkboxes else True,
+            current_state[sid] = {
+                "visible": self.sensor_checkboxes[k].isChecked() if k in self.sensor_checkboxes else False,
                 "axis": self.sensor_sides.get(k, "left"),
                 "move": self.sensor_move_active.get(k, False)
             }
+        self.session_view_states[self.profile["mode_name"]] = current_state
 
-        save_user_view_state(PROFILE["mode_name"], state_dict)
+        # 2. Записываем ВСЕ профили сессии в view_state.json
+        save_all_session_view_states(self.profile["mode_name"], self.session_view_states)
+
+        # 3. Чистый визуальный отклик кнопки без иконок
         self.btn_save_view.setText("Preset Saved!")
         QtCore.QTimer.singleShot(2000, lambda: self.btn_save_view.setText("Save View Preset"))
-        print(f"[OK] View preset for {PROFILE['mode_name']} saved successfully.")
+        print(f"[OK] All configured session profiles saved to view_state.json (Active: {self.profile['mode_name']}).")
 
     def apply_saved_or_default_view(self):
-        """Принудительно и строго применяет видимость и стороны осей к кривым и интерфейсу"""
-        saved_state = load_user_view_state(PROFILE["mode_name"])
+        # Сначала проверяем состояние в памяти сессии, затем файл на диске
+        saved_state = self.session_view_states.get(self.profile["mode_name"])
+        if saved_state is None:
+            saved_state = load_user_view_state(self.profile["mode_name"])
+
         all_sensors = self.p1_sensors + self.p2_sensors
 
         for s in all_sensors:
@@ -513,7 +652,6 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
                 if k in self.move_buttons:
                     self.toggle_sensor_move(k, self.move_buttons[k], force_state=is_move)
 
-                # ПРИНУДИТЕЛЬНО скрываем/показываем линию графика и шкалу
                 self.toggle_curve_visibility(k, is_vis)
             else:
                 if k in self.sensor_checkboxes:
@@ -527,7 +665,6 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
                 if k in self.move_buttons:
                     self.toggle_sensor_move(k, self.move_buttons[k], force_state=False)
 
-                # ПРИНУДИТЕЛЬНО скрываем всё для дефолта
                 self.toggle_curve_visibility(k, False)
 
     def seek_to_time(self, target_sec: float):
@@ -602,7 +739,7 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         if self.time_regions:
             self.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#00E5FF; font-size:7.5pt;'>({ranges_title})</span>")
         else:
-            self.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({PROFILE['mode_name']} Total)</span>")
+            self.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({self.profile['mode_name']} Total)</span>")
 
         self.table_summary.setRowCount(len(rows))
         for r_idx, (m, mn, mx, av) in enumerate(rows):
@@ -627,7 +764,7 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
             trend_data = TelemetryEngine.resample_series(self.df[s["col"]], self.current_step)
             self.curves[f"{k}_trend"].setData(t_res, trend_data)
 
-    def update_y_limits(self):
+    def update_y_limits(self, reset_x=False):
         def compute_limits(col):
             if col is None: return None, None
             s_data = TelemetryEngine.smooth_series(self.df[col], DEFAULT_SMOOTHING) if self.y_fit_mode == "Raw" else TelemetryEngine.resample_series(self.df[col], self.current_step)
@@ -637,7 +774,22 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
             pad = (mx - mn) * 0.08 if mx != mn else 1.0
             return mn - pad, mx + pad
 
-        self.vb1.setXRange(0.0, self.total_duration, padding=0)
+        if reset_x:
+            self.vb1.setXRange(0.0, self.total_duration, padding=0)
+
+        for s in self.p1_sensors + self.p2_sensors:
+            k = s["key"]
+            mn, mx = compute_limits(s["col"])
+            if mn is None or mx is None:
+                continue
+            self.sensor_y_limits[k] = [mn, mx]
+            if k in self.viewboxes_map:
+                self.viewboxes_map[k].setYRange(mn, mx, padding=0)
+                cur_side = self.sensor_sides.get(k, "left")
+                target_axis = self.axes_map[k][cur_side]
+                target_axis.picture = None
+                target_axis.setRange(mn, mx)
+                target_axis.update()
 
         for s in self.p1_sensors + self.p2_sensors:
             k = s["key"]
@@ -677,7 +829,6 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
             self.spin_raw.setValue(1.00)
             self.spin_trend.setValue(0.00)
         self.update_plots_data()
-        self.update_y_limits()
 
     def on_raw_alpha_changed(self, val):
         self.current_raw_alpha = float(val)
@@ -697,7 +848,7 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
     def save_result_action(self):
         QtWidgets.QApplication.processEvents()
         TelemetryEngine.export_summary_and_chart(
-            summary_dir=SUMMARY_DIR,
+            summary_dir=self.summary_dir,
             chart_filepath=self.chart_filepath,
             summary_filepath=self.summary_filepath,
             p1_plot=self.p1_plot,
@@ -705,7 +856,7 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
             df=self.df,
             time_data=self.time_data,
             current_step=self.current_step,
-            export_sensors=PROFILE["export_sensors"],
+            export_sensors=self.profile["export_sensors"],
             get_col_fn=lambda sid: TelemetryEngine.find_column_by_sensor_id(self.df, sid)
         )
         print(f"\n[SUCCESS] Hi-Res JPG chart saved to : {self.chart_filepath}")
@@ -720,9 +871,7 @@ if __name__ == '__main__':
         print(f"Error: Directory '{LOGS_DIR}' not found!")
         sys.exit(1)
 
-    os.makedirs(SUMMARY_DIR, exist_ok=True)
-
-    hw_model_name = PROFILE["mode_name"]
+    hw_model_name = "Hardware"
     if os.path.exists(HW_INFO_FILE):
         try:
             with open(HW_INFO_FILE, "r", encoding="utf-8") as f:
@@ -730,9 +879,7 @@ if __name__ == '__main__':
                 for comp in hw_info.get("components", []):
                     c_name = comp.get("name", "")
                     c_lower = c_name.lower()
-                    if PROFILE["mode_name"] == "CPU" and any(x in c_lower for x in ["ryzen", "core i", "threadripper"]) and "cpu" not in c_lower:
-                        hw_model_name = c_name
-                    elif PROFILE["mode_name"] == "GPU" and any(x in c_lower for x in ["rtx", "gtx", "geforce", "radeon"]):
+                    if any(x in c_lower for x in ["ryzen", "core i", "threadripper", "rtx", "gtx", "geforce", "radeon"]):
                         hw_model_name = c_name
         except Exception:
             pass
@@ -743,7 +890,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     print("="*60)
-    print(f"         COOLING ANALYZER SUITE [{PROFILE['mode_name']} MODE]         ")
+    print("         COOLING ANALYZER SUITE         ")
     print("="*60)
     for idx, f in enumerate(files):
         print(f"  [{idx + 1}] {f}")
