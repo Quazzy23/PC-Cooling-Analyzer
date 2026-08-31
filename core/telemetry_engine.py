@@ -120,51 +120,21 @@ class TelemetryEngine:
         return rows, ranges_title
 
     @staticmethod
-    def export_summary_and_chart(summary_dir, chart_filepath, summary_filepath, p1_plot, p2_plot, df, time_data, current_step, export_sensors, get_col_fn):
-        """Сохраняет сшитый Hi-Res график (JPG) и сжатую таблицу (CSV)"""
+    def export_summary_csv(summary_dir: str, summary_filepath: str, df: pd.DataFrame, time_data: np.ndarray, current_step: int, export_sensors: list, get_col_fn):
+        """
+        Экспортирует таблицу эволюции датчиков в CSV:
+        - Если Step > 1: выгрузка строго по точкам времени и усреднению линии тренда.
+        - Если Step == 1: выгрузка по всем существующим точкам времени 1 к 1.
+        """
         os.makedirs(summary_dir, exist_ok=True)
 
-        # 1. Склейка графиков в JPG
-        try:
-            import pyqtgraph.exporters as pg_exporters
-            tmp_p1 = chart_filepath.replace('.jpg', '_tmp_p1.jpg')
-            exporter_p1 = pg_exporters.ImageExporter(p1_plot.plotItem)
-            exporter_p1.parameters()['width'] = 1200
-            exporter_p1.export(tmp_p1)
-
-            tmp_p2 = chart_filepath.replace('.jpg', '_tmp_p2.jpg')
-            exporter_p2 = pg_exporters.ImageExporter(p2_plot.plotItem)
-            exporter_p2.parameters()['width'] = 1200
-            exporter_p2.export(tmp_p2)
-
-            img1 = QtGui.QImage(tmp_p1)
-            img2 = QtGui.QImage(tmp_p2)
-
-            w = max(img1.width(), img2.width())
-            h1, h2 = img1.height(), img2.height()
-
-            combined = QtGui.QImage(w, h1 + h2, QtGui.QImage.Format.Format_ARGB32)
-            combined.fill(QtGui.QColor("#0E0E0E"))
-
-            painter = QtGui.QPainter(combined)
-            painter.drawImage(0, 0, img1)
-            painter.drawImage(0, h1, img2)
-            painter.end()
-
-            combined.save(chart_filepath, "JPG", 92)
-
-            if os.path.exists(tmp_p1): os.remove(tmp_p1)
-            if os.path.exists(tmp_p2): os.remove(tmp_p2)
-        except Exception:
-            pass
-
-        # 2. Экспорт CSV
+        step = max(1, int(current_step))
         evolution_df = pd.DataFrame()
-        evolution_df['Time_Sec'] = TelemetryEngine.get_resampled_time(time_data, current_step)
+        evolution_df['Time_Sec'] = TelemetryEngine.get_resampled_time(time_data, step)
 
         for label, sid in export_sensors:
             fcol = get_col_fn(sid)
             if fcol is not None:
-                evolution_df[label] = TelemetryEngine.resample_series(df[fcol], current_step)
+                evolution_df[label] = TelemetryEngine.resample_series(df[fcol], step)
 
         evolution_df.to_csv(summary_filepath, index=False)

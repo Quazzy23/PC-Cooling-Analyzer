@@ -52,8 +52,7 @@ Run `utils/select_mic.py` and select your input device index from the list.
 Run `logger.py` to record telemetry to CSV and synchronized audio to MP3. Press `Ctrl+C` to stop logging.
 
 ### 8. Run analyzes
-Run `analyzer.py` and select the target CSV log to inspect interactive charts, summary metrics, and export reports.
-Run `audio_analyzer.py` and select the target audio file to inspect live FFT peaks, 2D spectrogram timelines, and acoustic filters.
+Run `analyzer.py` and select the target CSV log to inspect interactive charts and summary metrics.
 
 ---
 
@@ -63,7 +62,7 @@ Currently, this repository hosts the codebase required to run the benchmarking p
 * `/core` — Data processing engines (telemetry smoothing, metrics, audio DSP, FFT).
 * `/ui` — Stylesheets, custom axes, and the unified interactive ViewBox engine.
 * `/utils` — LHM client, sensor discovery dumpers, mic configuration, and setup scripts.
-* `analyzer.py`, `audio_analyzer.py` & `logger.py` — The primary executable interfaces.
+* `analyzer.py` & `logger.py` — The primary executable interfaces.
 
 ---
 

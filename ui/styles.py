@@ -52,18 +52,26 @@ def create_clean_2d_rect_item(rect: QtCore.QRectF, alpha: int = DEFAULT_REGION_A
 #                      QSS СТИЛИ
 # =======================================================
 
-# Чистые поля ввода (SpinBox) без стрелочек
+# Компактные поля ввода (SpinBox) для нижних тулбаров
 SPINBOX_CLEAN_QSS = """
     QAbstractSpinBox {
-        background-color: #1A1A1A;
+        background-color: #161616;
         color: #00E5FF;
         font-weight: bold;
-        font-size: 9pt;
-        border: 1px solid #333333;
+        font-size: 8.5pt;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        border: 1px solid #2C2C2C;
         border-radius: 4px;
-        padding-left: 6px;
-        padding-right: 6px;
-        min-height: 28px;
+        padding-left: 4px;
+        padding-right: 4px;
+        min-height: 26px;
+        max-height: 26px;
+    }
+    QAbstractSpinBox:hover {
+        border: 1px solid #444444;
+    }
+    QAbstractSpinBox:focus {
+        border: 1px solid #008B9E;
     }
     QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
         width: 0px;
@@ -72,48 +80,57 @@ SPINBOX_CLEAN_QSS = """
     }
 """
 
-# Стиль кнопок действий (Save, Fit, Play)
+# Компактные кнопки нижних тулбаров
 BTN_CYAN_QSS = """
     QPushButton {
-        background-color: #1A1A1A;
+        background-color: #161616;
         color: #00E5FF;
         font-weight: bold;
-        font-size: 9pt;
+        font-size: 8.5pt;
+        font-family: 'Segoe UI', Arial, sans-serif;
         border-radius: 4px;
-        border: 1px solid #333333;
+        border: 1px solid #2C2C2C;
+        min-height: 26px;
+        max-height: 26px;
     }
     QPushButton:hover {
-        background-color: #2A2A2A;
-        border: 1px solid #00E5FF;
+        background-color: #202020;
+        border: 1px solid #008B9E;
     }
 """
 
 BTN_GREEN_QSS = """
     QPushButton {
-        background-color: #1A1A1A;
+        background-color: #122016;
         color: #33FF57;
         font-weight: bold;
-        font-size: 9pt;
+        font-size: 8.5pt;
+        font-family: 'Segoe UI', Arial, sans-serif;
         border-radius: 4px;
-        border: 1px solid #333333;
+        border: 1px solid #1E4226;
+        min-height: 26px;
+        max-height: 26px;
     }
     QPushButton:hover {
-        background-color: #2A2A2A;
+        background-color: #182C1E;
         border: 1px solid #33FF57;
     }
 """
 
 BTN_RED_QSS = """
     QPushButton {
-        background-color: #1A1A1A;
+        background-color: #221216;
         color: #FF3366;
         font-weight: bold;
-        font-size: 9pt;
+        font-size: 8.5pt;
+        font-family: 'Segoe UI', Arial, sans-serif;
         border-radius: 4px;
-        border: 1px solid #333333;
+        border: 1px solid #461C26;
+        min-height: 26px;
+        max-height: 26px;
     }
     QPushButton:hover {
-        background-color: #2A2A2A;
+        background-color: #2C181D;
         border: 1px solid #FF3366;
     }
 """

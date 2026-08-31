@@ -61,28 +61,49 @@ class BaseInteractiveViewBox(pg.ViewBox):
         new_y_min, new_y_max = clamp_rigid_range(self.viewRange()[1], min_y_lim, max_y_lim)
         self.setRange(xRange=[new_x_min, new_x_max], yRange=[new_y_min, new_y_max], padding=0)
 
-    # 2. Нативное отслеживание движения мыши (Hover)
+    def _get_status_labels(self):
+        """Возвращает (активная_метка, неактивная_метка_другой_панели)"""
+        tel_panel = getattr(self.analyzer, 'telemetry_panel', None)
+        tel_lbl = getattr(tel_panel, 'lbl_telemetry_status', None) if tel_panel else getattr(self.analyzer, 'lbl_telemetry_status', None)
+
+        aud_panel = getattr(self.analyzer, 'audio_panel', None)
+        aud_lbl = getattr(aud_panel, 'lbl_audio_status', None) if aud_panel else None
+
+        if isinstance(self, CleanTimeViewBox):
+            return tel_lbl, aud_lbl
+        else:
+            return (aud_lbl or tel_lbl), (tel_lbl if aud_lbl else None)
+
     def hoverEvent(self, ev):
+        target_lbl, other_lbl = self._get_status_labels()
+
+        if other_lbl is not None:
+            other_lbl.setText("")
+
         if ev.isExit():
+            if target_lbl is not None:
+                target_lbl.setText("")
             return
-        if hasattr(self.analyzer, 'lbl_telemetry_status') and self.analyzer.lbl_telemetry_status is not None:
-            # Преобразуем пиксели мыши в реальные координаты графика
+
+        if target_lbl is not None:
             view_pos = self.mapSceneToView(ev.scenePos())
             top_time, coords_str = self.get_status_telemetry(view_pos, ev.scenePos())
-            
+
             if coords_str is not None:
                 if top_time is not None:
-                    # 2-строчный вид для analyzer.py (с временем в правом верхнем углу)
-                    formatted_text = f"""
-                        <table width='100%' cellspacing='0' cellpadding='0' style='color: #AAAAAA; font-size: 8.5pt;'>
-                            <tr><td align='right'><b>{top_time}</b></td></tr>
-                            <tr><td align='left'>{coords_str}</td></tr>
-                        </table>
-                    """
+                    formatted_text = (
+                        f"<div align='right' style='font-size: 7.5pt; font-family: Segoe UI, sans-serif; line-height: 110%;'>"
+                        f"<span style='color: #AAAAAA; font-weight: bold;'>{top_time}</span><br>"
+                        f"<span style='color: #777777;'>{coords_str}</span>"
+                        f"</div>"
+                    )
                 else:
-                    # 1-строчный чистый вид для audio_analyzer.py (без верхней строки)
-                    formatted_text = f"<span style='color: #AAAAAA; font-size: 8.5pt;'><b>{coords_str}</b></span>"
-                self.analyzer.lbl_telemetry_status.setText(formatted_text)
+                    formatted_text = (
+                        f"<div align='right' style='font-size: 7.5pt; font-family: Segoe UI, sans-serif;'>"
+                        f"<span style='color: #777777;'>{coords_str}</span>"
+                        f"</div>"
+                    )
+                target_lbl.setText(formatted_text)
 
     def get_status_telemetry(self, view_pos, scene_pos):
         """Возвращает (top_time_str, coords_str) для нижней строки статуса"""
@@ -205,8 +226,7 @@ class BaseInteractiveViewBox(pg.ViewBox):
     def pan_overlays(self, delta_y_pixels, height): pass
 
     def clear_existing_regions(self):
-        if hasattr(self.analyzer, 'clear_all_filters'): self.analyzer.clear_all_filters()
-        elif hasattr(self.analyzer, 'clear_all_time_regions'): self.analyzer.clear_all_time_regions()
+        pass
 
     def start_temp_selection(self, x, y):
         if self.is_2d_selection:
@@ -255,24 +275,36 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
         self.plot_widget = plot_widget_ref
         self.temp_region_p2 = None
 
+    def _is_p1(self):
+        p1 = getattr(self.analyzer, 'p1_plot', None)
+        if p1 is None and hasattr(self.analyzer, 'telemetry_panel'):
+            p1 = getattr(self.analyzer.telemetry_panel, 'p1_plot', None)
+        return self.plot_widget == p1
+
     def get_status_telemetry(self, view_pos, scene_pos):
-        panel_label = "P1" if self.plot_widget == self.analyzer.p1_plot else "P2"
-        target_sensors = self.analyzer.p1_sensors if panel_label == "P1" else self.analyzer.p2_sensors
+        is_p1 = self._is_p1()
+        panel_label = "P1" if is_p1 else "P2"
+        target_sensors = self.analyzer.p1_sensors if is_p1 else self.analyzer.p2_sensors
         values_list = []
 
         for s in target_sensors:
             k = s["key"]
+            # Учитываем только включенные датчики
             if k in self.analyzer.sensor_checkboxes and self.analyzer.sensor_checkboxes[k].isChecked():
                 if k in self.analyzer.viewboxes_map:
                     vb = self.analyzer.viewboxes_map[k]
                     val = vb.mapSceneToView(scene_pos).y()
-                    if "volt" in k.lower(): val_str = f"{val:.3f}"
-                    elif "RPM" in s["label"]: val_str = f"{val:.0f}"
-                    else: val_str = f"{val:.1f}"
+                    if "volt" in k.lower():
+                        val_str = f"{val:.3f}"
+                    elif "RPM" in s["label"] or "clock" in s["label"].lower():
+                        val_str = f"{val:.0f}"
+                    else:
+                        val_str = f"{val:.1f}"
                     values_list.append(val_str)
 
         sensors_str = f"{panel_label}: {' | '.join(values_list)}" if values_list else f"{panel_label}: —"
-        return f"{view_pos.x():.1f}", sensors_str
+        t_sec = max(0.0, min(float(getattr(self.analyzer, 'total_duration', 100.0)), view_pos.x()))
+        return f"{t_sec:.1f}s", sensors_str
 
     def get_active_overlay_ranges(self):
         return {k: vb.viewRange()[1] for k, vb in self.analyzer.viewboxes_map.items() if self.analyzer.sensor_move_active.get(k, False)}
@@ -299,7 +331,8 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
                     ax.update()
 
     def zoom_y(self, scale, mouse_scene):
-        target_sensors = self.analyzer.p1_sensors if self.plot_widget == self.analyzer.p1_plot else self.analyzer.p2_sensors
+        is_p1 = self._is_p1()
+        target_sensors = self.analyzer.p1_sensors if is_p1 else self.analyzer.p2_sensors
         target_keys = {s["key"] for s in target_sensors}
 
         for k, vb in self.analyzer.viewboxes_map.items():
@@ -324,12 +357,13 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
                     ax.update()
 
     def start_temp_selection(self, x, y):
-        # Создаем ровно по одной рамке на P1 и P2
         self.temp_selection_item = create_clean_region(x, x)
         self.temp_region_p2 = create_clean_region(x, x)
-        if hasattr(self.analyzer, 'p1_plot'):
+        if hasattr(self.analyzer, 'telemetry_panel'):
+            self.analyzer.telemetry_panel.p1_plot.addItem(self.temp_selection_item, ignoreBounds=True)
+            self.analyzer.telemetry_panel.p2_plot.addItem(self.temp_region_p2, ignoreBounds=True)
+        elif hasattr(self.analyzer, 'p1_plot'):
             self.analyzer.p1_plot.addItem(self.temp_selection_item, ignoreBounds=True)
-        if hasattr(self.analyzer, 'p2_plot'):
             self.analyzer.p2_plot.addItem(self.temp_region_p2, ignoreBounds=True)
 
     def update_temp_selection(self, x_min, x_max, y_min, y_max):
@@ -340,11 +374,15 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
 
     def finish_temp_selection(self, x_min, x_max, y_min, y_max):
         if self.temp_selection_item is not None:
-            if hasattr(self.analyzer, 'p1_plot'):
+            if hasattr(self.analyzer, 'telemetry_panel'):
+                self.analyzer.telemetry_panel.p1_plot.removeItem(self.temp_selection_item)
+            elif hasattr(self.analyzer, 'p1_plot'):
                 self.analyzer.p1_plot.removeItem(self.temp_selection_item)
             self.temp_selection_item = None
         if self.temp_region_p2 is not None:
-            if hasattr(self.analyzer, 'p2_plot'):
+            if hasattr(self.analyzer, 'telemetry_panel'):
+                self.analyzer.telemetry_panel.p2_plot.removeItem(self.temp_region_p2)
+            elif hasattr(self.analyzer, 'p2_plot'):
                 self.analyzer.p2_plot.removeItem(self.temp_region_p2)
             self.temp_region_p2 = None
         self.on_region_selected(x_min, x_max, y_min, y_max)
@@ -352,6 +390,10 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
     def on_region_selected(self, x_min, x_max, y_min, y_max):
         if (x_max - x_min) > 0.1:
             self.analyzer.add_time_region(x_min, x_max)
+
+    def clear_existing_regions(self):
+        if hasattr(self.analyzer, 'clear_all_time_regions'):
+            self.analyzer.clear_all_time_regions()
 
     def on_right_click(self, view_pos):
         self.analyzer.handle_right_click_on_timeline(view_pos.x())
@@ -362,6 +404,10 @@ class FFTFilterViewBox(BaseInteractiveViewBox):
     def __init__(self, analyzer_ref=None, *args, **kwargs):
         super().__init__(analyzer_ref=analyzer_ref, enable_time_seek=False, is_2d_selection=False, *args, **kwargs)
 
+    def clear_existing_regions(self):
+        if hasattr(self.analyzer, 'clear_all_filters'):
+            self.analyzer.clear_all_filters()
+            
     def get_x_limits(self):
         f_min = AUDIO_PROFILE["limit_freq_min"]
         nyq = float(getattr(self.analyzer.engine, 'sample_rate', 48000) / 2.0)
@@ -370,18 +416,22 @@ class FFTFilterViewBox(BaseInteractiveViewBox):
         return f_min, nyq
 
     def get_y_limits(self):
-        ymin = float(self.analyzer.spin_ymin.value()) if hasattr(self.analyzer, 'spin_ymin') else AUDIO_PROFILE["limit_db_min"]
-        ymax = float(self.analyzer.spin_ymax.value()) if hasattr(self.analyzer, 'spin_ymax') else AUDIO_PROFILE["limit_db_max"]
-        return ymin, ymax
+        if hasattr(self.analyzer, 'audio_panel') and hasattr(self.analyzer.audio_panel, 'spin_ymin'):
+            return float(self.analyzer.audio_panel.spin_ymin.value()), float(self.analyzer.audio_panel.spin_ymax.value())
+        elif hasattr(self.analyzer, 'spin_ymin'):
+            return float(self.analyzer.spin_ymin.value()), float(self.analyzer.spin_ymax.value())
+        return -10.0, 40.0
 
     def get_status_telemetry(self, view_pos, scene_pos):
         is_log = (getattr(self.analyzer, 'freq_scale_mode', 'Log') == "Log")
         freq = (10.0 ** view_pos.x()) if is_log else view_pos.x()
         freq_clamped = max(AUDIO_PROFILE["limit_freq_min"], min(AUDIO_PROFILE["limit_freq_max"], freq))
         db_val = view_pos.y()
-        cur_t = self.analyzer.engine.current_sample_idx / self.analyzer.engine.sample_rate
-        # Возвращаем None первым параметром, чтобы не было верхней строки
-        return None, f"P1: {freq_clamped:.0f} | {db_val:.1f} | {cur_t:.1f}"
+        cur_t = (self.analyzer.engine.current_sample_idx / self.analyzer.engine.sample_rate) if getattr(self.analyzer, 'engine', None) else 0.0
+        
+        top_time = f"{cur_t:.1f}s"
+        coords_str = f"P1: {freq_clamped:.0f} Hz | {db_val:.1f} dB | {cur_t:.1f}s"
+        return top_time, coords_str
 
     def on_region_selected(self, x_min, x_max, y_min, y_max):
         if (x_max - x_min) > 0.01:
@@ -401,16 +451,22 @@ class SpectrogramTimelineViewBox(BaseInteractiveViewBox):
     def __init__(self, analyzer_ref=None, *args, **kwargs):
         super().__init__(analyzer_ref=analyzer_ref, enable_time_seek=True, is_2d_selection=True, *args, **kwargs)
 
+    def clear_existing_regions(self):
+        if hasattr(self.analyzer, 'clear_all_filters'):
+            self.analyzer.clear_all_filters()
+            
     def get_y_limits(self):
         nyq = float(getattr(self.analyzer.engine, 'sample_rate', 48000) / 2.0)
         return AUDIO_PROFILE["limit_freq_min"], nyq
 
     def get_status_telemetry(self, view_pos, scene_pos):
-        t_mouse = max(0.0, min(self.analyzer.total_duration, view_pos.x()))
+        t_mouse = max(0.0, min(float(getattr(self.analyzer, 'total_duration', 100.0)), view_pos.x()))
         freq_mouse = max(AUDIO_PROFILE["limit_freq_min"], min(AUDIO_PROFILE["limit_freq_max"], view_pos.y()))
-        db_at_point = self.analyzer.get_spec_db_at(t_mouse, freq_mouse)
-        # Возвращаем None первым параметром, чтобы не было верхней строки
-        return None, f"P2: {t_mouse:.1f} | {freq_mouse:.0f} | {db_at_point:.1f}"
+        db_at_point = self.analyzer.get_spec_db_at(t_mouse, freq_mouse) if hasattr(self.analyzer, 'get_spec_db_at') else 0.0
+
+        top_time = f"{t_mouse:.1f}s"
+        coords_str = f"P2: {t_mouse:.1f}s | {freq_mouse:.0f} Hz | {db_at_point:.1f} dB"
+        return top_time, coords_str
 
     def on_region_selected(self, x_min, x_max, y_min, y_max):
         if (x_max - x_min) > 0.05 and (y_max - y_min) > 20:

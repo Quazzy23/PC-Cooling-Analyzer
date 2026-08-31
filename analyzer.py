@@ -1,6 +1,5 @@
 """
-Интерактивный визуализатор аппаратной телеметрии (PyQt6 + PyQtGraph)
-с динамическим переключением профилей (CPU / GPU / ALL) и авто-сохранением вида
+Единый комплекс аппаратной телеметрии и спектрального DAW-анализатора (PyQt6 + PyQtGraph)
 """
 import os
 import sys
@@ -14,13 +13,19 @@ from core.defaults import (
     load_sensor_profile, get_available_profiles,
     save_all_session_view_states, load_user_view_state, load_last_active_mode
 )
+from ui.styles import COMBOBOX_CLEAN_QSS
 from core.telemetry_engine import TelemetryEngine
-from ui.viewboxes import CleanTimeViewBox, OverlayViewBox
+from core.audio_engine import AudioEngine, LIMIT_FREQ_MIN
+from ui.viewboxes import OverlayViewBox
 from ui.styles import (
-    apply_pg_dark_theme, create_pen, create_timeline_cursor, create_value_tag,
-    SPINBOX_CLEAN_QSS, BTN_CYAN_QSS, BTN_GREEN_QSS, TABLE_SUMMARY_QSS,
-    BTN_SIDE_QSS, COMBOBOX_CLEAN_QSS, get_sensor_checkbox_qss, get_move_btn_qss
+    apply_pg_dark_theme, create_pen, create_value_tag, 
+    create_clean_region, create_clean_2d_rect_item,
+    BTN_GREEN_QSS, BTN_RED_QSS, get_move_btn_qss
 )
+from core.defaults import AUDIO_PROFILE, VIEW_STATE_PATH
+from ui.sidebar import StudioSidebar
+from ui.telemetry_panel import TelemetryPanel
+from ui.audio_panel import AudioPanel
 
 RESULTS_DIR = "results"
 LOGS_DIR = os.path.join(RESULTS_DIR, "sensors_logs")
@@ -32,25 +37,33 @@ DEFAULT_TREND_ALPHA = 0.0
 TIME_START = 0
 TIME_END = "last"
 ID_TIME = "TIME_SEC"
+ISOLATE_FFT_ON_FILTER = AUDIO_PROFILE.get("isolate_fft_on_filter", 0)
 
 apply_pg_dark_theme()
 
 
-class CoolingAnalyzerPro(QtWidgets.QMainWindow):
-    def __init__(self, df, selected_file, hw_model_name):
+class StudioSuiteWindow(QtWidgets.QMainWindow):
+    def __init__(self, df, selected_file, cpu_name="CPU", gpu_name="GPU", audio_path=None):
         super().__init__()
         self.df = df
         self.selected_file = selected_file
-        self.hw_model_name = hw_model_name
+        self.cpu_name = cpu_name
+        self.gpu_name = gpu_name
         self.clean_file_name = selected_file.replace("table_raw_", "")
 
-        # Загружаем последний активный профиль (CPU, GPU или ALL)
+        # Загружаем профиль
         self.current_mode = load_last_active_mode()
         self.profile = load_sensor_profile(self.current_mode)
         self.update_report_paths()
 
-        self.setWindowTitle(f"{self.profile['mode_name']} Cooling Analysis — {self.clean_file_name} ({hw_model_name})")
-        self.resize(1580, 930)
+        # Инициализируем звуковой движок при наличии аудио
+        self.audio_path = audio_path
+        self.engine = AudioEngine(audio_path) if (audio_path and os.path.exists(audio_path)) else None
+        self.total_duration_audio = self.engine.total_duration if self.engine else 0.0
+
+        cur_hw = self.get_current_hardware_name()
+        self.setWindowTitle(f"PC Cooling Studio Suite [{self.profile['mode_name']}] — {self.clean_file_name} ({cur_hw})")
+        self.resize(1850, 960)
 
         # Состояние
         self.current_step = 1
@@ -58,14 +71,15 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.current_trend_alpha = DEFAULT_TREND_ALPHA
         self.y_fit_mode = "Raw"
         self.current_time_cursor = 0.0
+        self.freq_scale_mode = "Log"
+        self.spec_db_matrix = None
+        self.spec_f_min = LIMIT_FREQ_MIN
+        self.spec_f_max = (self.engine.sample_rate / 2.0) if self.engine else 8000.0
 
-        # Сессионный кэш профилей (сохраняет выбор в памяти при переключениях)
-        self.session_view_states = {}
-
-        # Реестры управления
-        self.sensor_sides = {}       
-        self.sensor_move_active = {} 
-        self.sensor_y_limits = {}    
+        # Реестры
+        self.sensor_sides = {}
+        self.sensor_move_active = {}
+        self.sensor_y_limits = {}
         self.panning_data = None
         self.curves = {}
         self._persistent_curves = []
@@ -77,16 +91,29 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.side_buttons = {}
         self.move_buttons = {}
         self.intersection_tags = {}
+        self.session_view_states = {}
 
         self.resolve_sensors()
         self.init_ui()
-        # Выставляем отображение всей длительности лога от 0 до конца
-        self.vb1.setXRange(0.0, self.total_duration, padding=0)
         self.apply_saved_or_default_view()
         self.populate_summary_table()
         self.update_plots_data()
         self.update_y_limits()
         self.seek_to_time(0.0)
+
+        if self.engine:
+            self.calculate_and_render_spectrogram()
+            self.audio_timer = QtCore.QTimer()
+            self.audio_timer.timeout.connect(self.update_playhead)
+            self.audio_timer.start(16)
+
+    def get_current_hardware_name(self) -> str:
+        if self.current_mode == "CPU":
+            return self.cpu_name
+        elif self.current_mode == "GPU":
+            return self.gpu_name
+        else:
+            return f"{self.cpu_name} & {self.gpu_name}"
 
     def update_report_paths(self):
         self.summary_dir = os.path.join(RESULTS_DIR, "summary_reports", self.profile["summary_dir_name"])
@@ -99,7 +126,8 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.col_time = TelemetryEngine.find_column_by_sensor_id(self.df, ID_TIME) or self.df.columns[0]
         raw_t = self.df[self.col_time].to_numpy().astype(float)
         self.time_data = raw_t - raw_t[0]
-        self.total_duration = float(self.time_data[-1])
+        self.total_duration_telemetry = float(self.time_data[-1])
+        self.total_duration = max(self.total_duration_telemetry, self.total_duration_audio)
 
         self.p1_sensors = []
         for s in self.profile.get("panel1_sensors", []):
@@ -147,52 +175,6 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         sync_views()
         return vb, ax_left, ax_right
 
-    def sync_all_overlay_views(self):
-        """Принудительно расправляет все оверлейные графики и оси по всему окну"""
-        for p_plot, sensors in [(self.p1_plot, self.p1_sensors), (self.p2_plot, self.p2_sensors)]:
-            rect = p_plot.plotItem.vb.sceneBoundingRect()
-            if rect.width() <= 1 or rect.height() <= 1:
-                continue
-            vr_x = p_plot.plotItem.vb.viewRange()[0]
-            for s in sensors:
-                k = s["key"]
-                if k in self.viewboxes_map:
-                    vb = self.viewboxes_map[k]
-                    vb.setGeometry(rect)
-                    vb.setXRange(vr_x[0], vr_x[1], padding=0)
-                if k in self.axes_map:
-                    ax_l = self.axes_map[k]['left']
-                    ax_r = self.axes_map[k]['right']
-                    ax_l.setGeometry(QtCore.QRectF(rect.left() - 50, rect.top(), 50, rect.height()))
-                    ax_r.setGeometry(QtCore.QRectF(rect.right(), rect.top(), 50, rect.height()))
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        # Гарантированно расправляем геометрию осей через 30мс после открытия окна
-        QtCore.QTimer.singleShot(30, self.sync_all_overlay_views)
-        QtCore.QTimer.singleShot(30, self.update_y_limits)
-
-    def create_telemetry_plot(self, title_html: str, show_bottom_label: bool = False):
-        vb = CleanTimeViewBox(self)
-        plot = pg.PlotWidget(viewBox=vb)
-        vb.plot_widget = plot
-
-        plot.showGrid(x=True, y=True, alpha=0.18)
-        plot.setTitle(title_html, justify='left')
-        plot.hideAxis('left')
-        plot.hideAxis('right')
-        plot.getAxis('bottom').enableAutoSIPrefix(False)
-        plot.getAxis('bottom').setPen(pg.mkPen('#444444', width=1))
-        plot.getAxis('bottom').setTextPen(pg.mkPen('#AAAAAA'))
-        plot.plotItem.layout.setContentsMargins(55, 0, 55, 0)
-
-        if show_bottom_label:
-            plot.setLabel('bottom', 'Time (Seconds)')
-
-        cursor = create_timeline_cursor()
-        plot.addItem(cursor, ignoreBounds=True)
-        return plot, vb, cursor
-
     def setup_sensors_for_plot(self, sensors: list, plot_widget: pg.PlotWidget):
         for s in sensors:
             k = s["key"]
@@ -226,246 +208,249 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
     def init_ui(self):
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
-        self.main_layout = QtWidgets.QHBoxLayout(central_widget)
-        self.main_layout.setContentsMargins(15, 10, 15, 10)
-        self.main_layout.setSpacing(14)
+        root_layout = QtWidgets.QVBoxLayout(central_widget)
+        root_layout.setContentsMargins(12, 8, 12, 10)
+        root_layout.setSpacing(8)
 
-        graphs_container = QtWidgets.QWidget()
-        graphs_layout = QtWidgets.QVBoxLayout(graphs_container)
-        graphs_layout.setContentsMargins(0, 0, 0, 0)
-        graphs_layout.setSpacing(10)
+        # =======================================================
+        #           ВЕРХНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ (TOP BAR)
+        # =======================================================
+        top_bar = QtWidgets.QFrame()
+        top_bar.setFixedHeight(40)
+        top_bar.setStyleSheet("""
+            QFrame {
+                background-color: #121212;
+                border: 1px solid #2A2A2A;
+                border-radius: 6px;
+            }
+        """)
+        top_layout = QtWidgets.QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(10, 4, 10, 4)
+        top_layout.setSpacing(10)
 
-        # 1. Верхний график (P1)
-        p1_title = f"<span style='color: #FFFFFF; font-size: 11pt;'><b>1. {self.profile['chart_title_prefix']} ({self.hw_model_name} — {self.clean_file_name})</b></span>"
-        self.p1_plot, self.vb1, self.cursor_line_p1 = self.create_telemetry_plot(p1_title)
-        self.setup_sensors_for_plot(self.p1_sensors, self.p1_plot)
-        graphs_layout.addWidget(self.p1_plot, stretch=5)
-
-        # 2. Нижний график (P2)
-        p2_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>2. {self.profile['panel2_title']}</b></span>"
-        self.p2_plot, self.vb2, self.cursor_line_p2 = self.create_telemetry_plot(p2_title, show_bottom_label=True)
-        self.vb2.setXLink(self.vb1)
-        self.setup_sensors_for_plot(self.p2_sensors, self.p2_plot)
-        graphs_layout.addWidget(self.p2_plot, stretch=3)
-
-        # 3. Нижняя панель управления
-        controls_layout = QtWidgets.QHBoxLayout()
-        controls_layout.setSpacing(12)
-
-        lbl_smooth = QtWidgets.QLabel("Smooth:")
-        lbl_smooth.setStyleSheet("color: white; font-size: 9pt;")
-        controls_layout.addWidget(lbl_smooth)
-
-        self.spin_smooth = QtWidgets.QSpinBox()
-        self.spin_smooth.setRange(1, 30)
-        self.spin_smooth.setValue(DEFAULT_SMOOTHING)
-        self.spin_smooth.setFixedWidth(65)
-        self.spin_smooth.setStyleSheet(SPINBOX_CLEAN_QSS)
-        self.spin_smooth.valueChanged.connect(self.on_smooth_changed)
-        controls_layout.addWidget(self.spin_smooth)
-
-        controls_layout.addSpacing(6)
-
-        lbl_step = QtWidgets.QLabel("Step:")
-        lbl_step.setStyleSheet("color: white; font-weight: bold; font-size: 9pt;")
-        controls_layout.addWidget(lbl_step)
-
-        self.spin_step = QtWidgets.QSpinBox()
-        self.spin_step.setRange(1, 200)
-        self.spin_step.setSingleStep(5)
-        self.spin_step.setValue(self.current_step)
-        self.spin_step.setFixedWidth(65)
-        self.spin_step.setStyleSheet(SPINBOX_CLEAN_QSS)
-        self.spin_step.valueChanged.connect(self.on_step_changed)
-        controls_layout.addWidget(self.spin_step)
-
-        lbl_raw = QtWidgets.QLabel("Raw Fog:")
-        lbl_raw.setStyleSheet("color: white; font-size: 9pt;")
-        controls_layout.addWidget(lbl_raw)
-
-        self.spin_raw = QtWidgets.QDoubleSpinBox()
-        self.spin_raw.setRange(0.0, 1.0)
-        self.spin_raw.setSingleStep(0.05)
-        self.spin_raw.setValue(self.current_raw_alpha)
-        self.spin_raw.setFixedWidth(65)
-        self.spin_raw.setStyleSheet(SPINBOX_CLEAN_QSS)
-        self.spin_raw.valueChanged.connect(self.on_raw_alpha_changed)
-        controls_layout.addWidget(self.spin_raw)
-
-        lbl_trend = QtWidgets.QLabel("Trend A:")
-        lbl_trend.setStyleSheet("color: white; font-size: 9pt;")
-        controls_layout.addWidget(lbl_trend)
-
-        self.spin_trend = QtWidgets.QDoubleSpinBox()
-        self.spin_trend.setRange(0.0, 1.0)
-        self.spin_trend.setSingleStep(0.05)
-        self.spin_trend.setValue(self.current_trend_alpha)
-        self.spin_trend.setFixedWidth(65)
-        self.spin_trend.setStyleSheet(SPINBOX_CLEAN_QSS)
-        self.spin_trend.valueChanged.connect(self.on_trend_alpha_changed)
-        controls_layout.addWidget(self.spin_trend)
-
-        controls_layout.addSpacing(6)
-
-        self.btn_fit = QtWidgets.QPushButton("Fit: Raw")
-        self.btn_fit.setFixedSize(95, 32)
-        self.btn_fit.setStyleSheet(BTN_CYAN_QSS)
-        self.btn_fit.clicked.connect(self.toggle_y_fit)
-        controls_layout.addWidget(self.btn_fit)
-
-        self.btn_save = QtWidgets.QPushButton("Save Result")
-        self.btn_save.setFixedSize(115, 32)
-        self.btn_save.setStyleSheet(BTN_GREEN_QSS)
-        self.btn_save.clicked.connect(self.save_result_action)
-        controls_layout.addWidget(self.btn_save)
-
-        controls_layout.addStretch()
-        
-        self.lbl_telemetry_status = QtWidgets.QLabel("Click [LMB] on charts to place timeline cursor...")
-        self.lbl_telemetry_status.setStyleSheet("color: #888888; font-style: italic; font-size: 8.5pt;")
-        controls_layout.addWidget(self.lbl_telemetry_status)
-
-        graphs_layout.addLayout(controls_layout)
-
-        # 4. Сайдбар: Выбор профиля + Таблица + Паспорт датчиков
-        sidebar = QtWidgets.QFrame()
-        sidebar.setFixedWidth(380)
-        sidebar.setStyleSheet("background-color: #121212; border: 1px solid #2A2A2A; border-radius: 6px; padding: 6px;")
-        sb_layout = QtWidgets.QVBoxLayout(sidebar)
-        sb_layout.setContentsMargins(8, 8, 8, 8)
-        sb_layout.setSpacing(8)
-
-        # Блок выбора профиля (CPU / GPU / ALL)
-        row_prof = QtWidgets.QHBoxLayout()
+        # 1. Выбор профиля (Profile)
         lbl_prof = QtWidgets.QLabel("<b>PROFILE:</b>")
-        lbl_prof.setStyleSheet("color: #00E5FF; font-size: 9pt;")
-        row_prof.addWidget(lbl_prof)
+        lbl_prof.setStyleSheet("color: #00E5FF; font-size: 9pt; border: none;")
+        top_layout.addWidget(lbl_prof)
 
         self.combo_profile = QtWidgets.QComboBox()
         self.combo_profile.setStyleSheet(COMBOBOX_CLEAN_QSS)
+        self.combo_profile.setFixedWidth(100)
         available_modes = get_available_profiles()
         self.combo_profile.addItems(available_modes)
 
-        # Выставляем текущий активный профиль
         curr_idx = self.combo_profile.findText(self.profile["mode_name"])
         if curr_idx >= 0:
             self.combo_profile.setCurrentIndex(curr_idx)
 
         self.combo_profile.currentTextChanged.connect(self.on_profile_switched)
-        row_prof.addWidget(self.combo_profile, stretch=1)
-        sb_layout.addLayout(row_prof)
+        top_layout.addWidget(self.combo_profile)
 
-        self.lbl_summary_title = QtWidgets.QLabel(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({self.profile['mode_name']})</span>")
-        self.lbl_summary_title.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
-        sb_layout.addWidget(self.lbl_summary_title)
+        top_layout.addSpacing(6)
 
-        self.table_summary = QtWidgets.QTableWidget()
-        self.table_summary.setColumnCount(4)
-        self.table_summary.setHorizontalHeaderLabels(["Metric", "Min", "Max", "Avg"])
-        
-        header = self.table_summary.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.table_summary.verticalHeader().setVisible(False)
-        self.table_summary.verticalHeader().setDefaultSectionSize(20)
-        self.table_summary.setShowGrid(False)
-        self.table_summary.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_summary.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
-        self.table_summary.setStyleSheet(TABLE_SUMMARY_QSS)
-        sb_layout.addWidget(self.table_summary, stretch=5)
+        # Разделитель
+        sep1 = QtWidgets.QFrame()
+        sep1.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        sep1.setStyleSheet("color: #333333; border: none;")
+        top_layout.addWidget(sep1)
 
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #2A2A2A;")
-        sb_layout.addWidget(sep)
+        # 2. Модули отображения (Telemetry / Audio)
+        lbl_modules = QtWidgets.QLabel("<b>MODULES:</b>")
+        lbl_modules.setStyleSheet("color: #888888; font-size: 8.5pt; border: none;")
+        top_layout.addWidget(lbl_modules)
 
-        lbl_passport_title = QtWidgets.QLabel("<b>SENSOR PASSPORT & VISIBILITY</b>")
-        lbl_passport_title.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
-        sb_layout.addWidget(lbl_passport_title)
+        self.btn_toggle_telemetry = QtWidgets.QPushButton("Telemetry (P1 / P2)")
+        self.btn_toggle_telemetry.setCheckable(True)
+        self.btn_toggle_telemetry.setChecked(True)
+        self.btn_toggle_telemetry.setFixedHeight(28)
+        self.btn_toggle_telemetry.clicked.connect(self.toggle_telemetry_module)
+        top_layout.addWidget(self.btn_toggle_telemetry)
 
-        passport_scroll = QtWidgets.QScrollArea()
-        passport_scroll.setWidgetResizable(True)
-        passport_scroll.setStyleSheet("background: transparent; border: none;")
-        
-        self.passport_widget = QtWidgets.QWidget()
-        self.passport_layout = QtWidgets.QVBoxLayout(self.passport_widget)
-        self.passport_layout.setContentsMargins(0, 0, 0, 0)
-        self.passport_layout.setSpacing(3)
+        self.btn_toggle_audio = QtWidgets.QPushButton("Audio DAW (FFT / Spec)")
+        self.btn_toggle_audio.setCheckable(True)
+        self.btn_toggle_audio.setChecked(True)
+        self.btn_toggle_audio.setFixedHeight(28)
+        self.btn_toggle_audio.clicked.connect(self.toggle_audio_module)
+        top_layout.addWidget(self.btn_toggle_audio)
 
-        self.populate_passport_rows()
+        self._update_module_buttons_style()
 
-        passport_scroll.setWidget(self.passport_widget)
-        sb_layout.addWidget(passport_scroll, stretch=5)
+        top_layout.addStretch()
 
-        # Кнопка сохранения пресета вида
-        self.btn_save_view = QtWidgets.QPushButton("Save View Preset")
-        self.btn_save_view.setFixedHeight(30)
-        self.btn_save_view.setToolTip("Saves current visibility, axis side and zoom M-state for active profile")
-        self.btn_save_view.setStyleSheet(BTN_CYAN_QSS)
-        self.btn_save_view.clicked.connect(self.save_view_preset_action)
-        sb_layout.addWidget(self.btn_save_view)
+        # Паспорт лога и устройства (Hardware единым серым цветом через |)
+        lbl_info = QtWidgets.QLabel(
+            f"<span style='color:#888888;'>Log:</span> <b style='color:#00E5FF;'>{self.clean_file_name}</b> "
+            f"<span style='color:#444444;'>|</span> "
+            f"<span style='color:#888888;'>Hardware: {self.cpu_name} | {self.gpu_name}</span>"
+        )
+        lbl_info.setStyleSheet("font-size: 8.5pt; border: none;")
+        top_layout.addWidget(lbl_info)
 
-        self.main_layout.addWidget(graphs_container, stretch=7)
-        self.main_layout.addWidget(sidebar, stretch=3)
+        root_layout.addWidget(top_bar)
 
-    def populate_passport_rows(self):
-        # Очищаем старые строки паспорта
-        while self.passport_layout.count():
-            item = self.passport_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        # =======================================================
+        #                 ГЛАВНАЯ ОБЛАСТЬ ГРАФИКОВ
+        # =======================================================
+        self.sidebar = StudioSidebar(self)
+        self.telemetry_panel = TelemetryPanel(self)
+        self.audio_panel = AudioPanel(self)
 
-        for s in self.p1_sensors + self.p2_sensors:
-            self.add_passport_row(s)
-        self.passport_layout.addStretch()
+        # Связываем X-оси аудиопанели с телеметрией
+        self.audio_panel.spec_vb.setXLink(self.telemetry_panel.vb1)
+        self.telemetry_panel.vb2.setXLink(self.telemetry_panel.vb1)
 
-    def add_passport_row(self, s):
-        k = s["key"]
-        row_widget = QtWidgets.QWidget()
-        row_layout = QtWidgets.QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(2, 0, 2, 0)
-        row_layout.setSpacing(4)
-        row_widget.setFixedHeight(24)
+        # 1. Внутренний сплиттер графиков (Телеметрия | Аудио)
+        self.plots_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.plots_splitter.setHandleWidth(8)
+        self.plots_splitter.setChildrenCollapsible(False)
+        self.plots_splitter.setStyleSheet("""
+            QSplitter::handle:horizontal {
+                background-color: #222222;
+                width: 6px;
+                margin: 0px 2px;
+                border-radius: 3px;
+            }
+            QSplitter::handle:horizontal:hover {
+                background-color: #00E5FF;
+            }
+        """)
+        self.plots_splitter.addWidget(self.telemetry_panel)
+        self.plots_splitter.addWidget(self.audio_panel)
+        self.plots_splitter.setStretchFactor(0, 1)
+        self.plots_splitter.setStretchFactor(1, 1)
 
-        cb = QtWidgets.QCheckBox(s['label'])
-        cb.blockSignals(True)
-        cb.setChecked(False)
-        cb.blockSignals(False)
-        cb.setStyleSheet(get_sensor_checkbox_qss(s['color']))
-        cb.toggled.connect(lambda checked, key=k: self.toggle_curve_visibility(key, checked))
-        row_layout.addWidget(cb, stretch=1)
-        self.sensor_checkboxes[k] = cb
+        # 2. Внешний сплиттер (Сайдбар | Область графиков)
+        self.outer_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.outer_splitter.setHandleWidth(8)
+        self.outer_splitter.setChildrenCollapsible(False)
+        self.outer_splitter.setStyleSheet("""
+            QSplitter::handle:horizontal {
+                background-color: #222222;
+                width: 6px;
+                margin: 0px 2px;
+                border-radius: 3px;
+            }
+            QSplitter::handle:horizontal:hover {
+                background-color: #00E5FF;
+            }
+        """)
+        self.outer_splitter.addWidget(self.sidebar)
+        self.outer_splitter.addWidget(self.plots_splitter)
+        self.outer_splitter.setStretchFactor(0, 0)
+        self.outer_splitter.setStretchFactor(1, 1)
 
-        cur_side = self.sensor_sides.get(k, "left")
-        side_text = "L" if cur_side == "left" else "R"
-        btn_side = QtWidgets.QPushButton(side_text)
-        btn_side.setFixedSize(20, 17)
-        btn_side.setToolTip("Toggle Axis Side (Left / Right)")
-        btn_side.setStyleSheet(BTN_SIDE_QSS)
-        btn_side.clicked.connect(lambda _, key=k, btn=btn_side: self.toggle_axis_side(key, btn))
-        row_layout.addWidget(btn_side)
-        self.side_buttons[k] = btn_side
+        root_layout.addWidget(self.outer_splitter, stretch=1)
 
-        self.sensor_move_active[k] = False
-        btn_move = QtWidgets.QPushButton("M")
-        btn_move.setFixedSize(20, 17)
-        btn_move.setToolTip("Enable/Disable Zoom & Pan for this sensor")
-        btn_move.setStyleSheet(get_move_btn_qss(False))
-        btn_move.clicked.connect(lambda _, key=k, btn=btn_move: self.toggle_sensor_move(key, btn))
-        row_layout.addWidget(btn_move)
-        self.move_buttons[k] = btn_move
+    def _update_module_buttons_style(self):
+        active_qss = """
+            QPushButton {
+                background-color: #10252C;
+                color: #5CE1E6;
+                font-weight: bold;
+                font-size: 8.5pt;
+                border: 1px solid #008B9E;
+                border-radius: 4px;
+                padding: 0px 10px;
+            }
+        """
+        inactive_qss = """
+            QPushButton {
+                background-color: #161616;
+                color: #666666;
+                font-size: 8.5pt;
+                border: 1px solid #2C2C2C;
+                border-radius: 4px;
+                padding: 0px 10px;
+            }
+        """
+        self.btn_toggle_telemetry.setStyleSheet(active_qss if self.btn_toggle_telemetry.isChecked() else inactive_qss)
+        self.btn_toggle_audio.setStyleSheet(active_qss if self.btn_toggle_audio.isChecked() else inactive_qss)
 
-        self.passport_layout.addWidget(row_widget)
+    def toggle_telemetry_module(self, checked):
+        if not checked and not self.btn_toggle_audio.isChecked():
+            self.btn_toggle_telemetry.setChecked(True)
+            return
+
+        self.sidebar.setVisible(checked)
+        self.telemetry_panel.setVisible(checked)
+        self._update_module_buttons_style()
+        self._rebalance_splitter()
+
+    def toggle_audio_module(self, checked):
+        if not checked and not self.btn_toggle_telemetry.isChecked():
+            self.btn_toggle_audio.setChecked(True)
+            return
+
+        self.audio_panel.setVisible(checked)
+        self._update_module_buttons_style()
+        self._rebalance_splitter()
+
+    def _fit_timelines_to_full_duration(self):
+        if hasattr(self, 'telemetry_panel') and hasattr(self.telemetry_panel, 'vb1'):
+            self.telemetry_panel.vb1.setXRange(0.0, self.total_duration, padding=0)
+        if hasattr(self, 'audio_panel') and hasattr(self.audio_panel, 'spec_vb'):
+            self.audio_panel.spec_vb.setXRange(0.0, self.total_duration, padding=0)
+        self.sync_all_overlay_views()
+
+    def sync_all_overlay_views(self):
+        for p_plot, sensors in [(self.telemetry_panel.p1_plot, self.p1_sensors), (self.telemetry_panel.p2_plot, self.p2_sensors)]:
+            rect = p_plot.plotItem.vb.sceneBoundingRect()
+            if rect.width() <= 1 or rect.height() <= 1:
+                continue
+            vr_x = p_plot.plotItem.vb.viewRange()[0]
+            for s in sensors:
+                k = s["key"]
+                if k in self.viewboxes_map:
+                    vb = self.viewboxes_map[k]
+                    vb.setGeometry(rect)
+                    vb.setXRange(vr_x[0], vr_x[1], padding=0)
+                if k in self.axes_map:
+                    ax_l = self.axes_map[k]['left']
+                    ax_r = self.axes_map[k]['right']
+                    ax_l.setGeometry(QtCore.QRectF(rect.left() - 50, rect.top(), 50, rect.height()))
+                    ax_r.setGeometry(QtCore.QRectF(rect.right(), rect.top(), 50, rect.height()))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(30, self.sync_all_overlay_views)
+        QtCore.QTimer.singleShot(30, self.update_y_limits)
+        QtCore.QTimer.singleShot(50, lambda: self.outer_splitter.setSizes([340, 1500]))
+        QtCore.QTimer.singleShot(50, lambda: self.plots_splitter.setSizes([750, 750]))
+        QtCore.QTimer.singleShot(70, self._fit_timelines_to_full_duration)
+
+    def _rebalance_splitter(self):
+        t_vis = self.btn_toggle_telemetry.isChecked()
+        a_vis = self.btn_toggle_audio.isChecked()
+
+        if t_vis and a_vis:
+            self.sidebar.setVisible(True)
+            self.telemetry_panel.setVisible(True)
+            self.audio_panel.setVisible(True)
+            self.outer_splitter.setSizes([340, 1500])
+            self.plots_splitter.setSizes([750, 750])
+        elif t_vis and not a_vis:
+            self.sidebar.setVisible(True)
+            self.telemetry_panel.setVisible(True)
+            self.audio_panel.setVisible(False)
+            self.outer_splitter.setSizes([340, 1500])
+        elif not t_vis and a_vis:
+            self.sidebar.setVisible(False)
+            self.telemetry_panel.setVisible(False)
+            self.audio_panel.setVisible(True)
+
+        QtCore.QTimer.singleShot(50, self._fit_timelines_to_full_duration)
+
+    def _fit_timelines_to_full_duration(self):
+        if hasattr(self, 'telemetry_panel') and hasattr(self.telemetry_panel, 'vb1'):
+            self.telemetry_panel.vb1.setXRange(0.0, self.total_duration, padding=0)
+        if hasattr(self, 'audio_panel') and hasattr(self.audio_panel, 'spec_vb'):
+            self.audio_panel.spec_vb.setXRange(0.0, self.total_duration, padding=0)
+        self.sync_all_overlay_views()
 
     def on_profile_switched(self, new_mode: str):
-        """Мгновенно переключает профиль (CPU / GPU / ALL) на лету без перезапуска"""
         if not new_mode or new_mode == self.current_mode:
             return
 
-        # Запоминаем состояние уходящего профиля в памяти сессии
         current_state = {}
         for s in self.p1_sensors + self.p2_sensors:
             k = s["key"]
@@ -481,28 +466,24 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.profile = load_sensor_profile(self.current_mode)
         self.update_report_paths()
 
-        # Обновляем заголовки
-        self.setWindowTitle(f"{self.profile['mode_name']} Cooling Analysis — {self.clean_file_name} ({self.hw_model_name})")
-        p1_title = f"<span style='color: #FFFFFF; font-size: 11pt;'><b>1. {self.profile['chart_title_prefix']} ({self.hw_model_name} — {self.clean_file_name})</b></span>"
-        self.p1_plot.setTitle(p1_title, justify='left')
+        cur_hw = self.get_current_hardware_name()
+        self.setWindowTitle(f"PC Cooling Studio Suite [{self.profile['mode_name']}] — {self.clean_file_name} ({cur_hw})")
+        p1_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>1. {self.profile['chart_title_prefix']} ({cur_hw} — {self.clean_file_name})</b></span>"
+        self.telemetry_panel.p1_plot.setTitle(p1_title, justify='left')
         p2_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>2. {self.profile['panel2_title']}</b></span>"
-        self.p2_plot.setTitle(p2_title, justify='left')
+        self.telemetry_panel.p2_plot.setTitle(p2_title, justify='left')
 
-        # Корректно и безопасно удаляем элементы строго из их родной сцены
         for k, vb in list(self.viewboxes_map.items()):
             if vb.scene() is not None:
                 vb.scene().removeItem(vb)
-
         for k, axes in list(self.axes_map.items()):
             for ax in axes.values():
                 if ax.scene() is not None:
                     ax.scene().removeItem(ax)
-
         for k, tag in list(self.intersection_tags.items()):
             if tag.scene() is not None:
                 tag.scene().removeItem(tag)
 
-        # Сбрасываем реестры
         self.sensor_sides.clear()
         self.sensor_move_active.clear()
         self.sensor_y_limits.clear()
@@ -516,13 +497,11 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.move_buttons.clear()
         self.intersection_tags.clear()
 
-        # Пересобираем датчики для нового профиля
         self.resolve_sensors()
-        self.setup_sensors_for_plot(self.p1_sensors, self.p1_plot)
-        self.setup_sensors_for_plot(self.p2_sensors, self.p2_plot)
-        self.populate_passport_rows()
+        self.setup_sensors_for_plot(self.p1_sensors, self.telemetry_panel.p1_plot)
+        self.setup_sensors_for_plot(self.p2_sensors, self.telemetry_panel.p2_plot)
+        self.sidebar.populate_passport_rows()
 
-        # Применяем сохраненный пресет для этого режима
         self.apply_saved_or_default_view()
         self.populate_summary_table()
         self.update_plots_data()
@@ -537,7 +516,7 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.sensor_sides[key] = new_side
         btn.setText("L" if new_side == "left" else "R")
 
-        is_visible = self.sensor_checkboxes[key].isChecked()
+        is_visible = self.sensor_checkboxes[key].isChecked() if key in self.sensor_checkboxes else True
         axes = self.axes_map[key]
         plot_widget = self.plot_map[key]
         vb = self.viewboxes_map[key]
@@ -601,8 +580,6 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         self.seek_to_time(self.current_time_cursor)
 
     def save_view_preset_action(self):
-        """Сохраняет состояние всех настроенных в сессии профилей (CPU, GPU, ALL) на диск"""
-        # 1. Фиксируем состояние текущего открытого профиля в памяти сессии
         current_state = {}
         all_sensors = self.p1_sensors + self.p2_sensors
         for s in all_sensors:
@@ -614,78 +591,68 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
                 "move": self.sensor_move_active.get(k, False)
             }
         self.session_view_states[self.profile["mode_name"]] = current_state
-
-        # 2. Записываем ВСЕ профили сессии в view_state.json
         save_all_session_view_states(self.profile["mode_name"], self.session_view_states)
 
-        # 3. Чистый визуальный отклик кнопки без иконок
-        self.btn_save_view.setText("Preset Saved!")
-        QtCore.QTimer.singleShot(2000, lambda: self.btn_save_view.setText("Save View Preset"))
-        print(f"[OK] All configured session profiles saved to view_state.json (Active: {self.profile['mode_name']}).")
+        self.sidebar.btn_save_view.setText("Preset Saved!")
+        QtCore.QTimer.singleShot(2000, lambda: self.sidebar.btn_save_view.setText("Save View Preset"))
+        print(f"[OK] View presets saved successfully.")
 
     def apply_saved_or_default_view(self):
-        # Сначала проверяем состояние в памяти сессии, затем файл на диске
         saved_state = self.session_view_states.get(self.profile["mode_name"])
         if saved_state is None:
             saved_state = load_user_view_state(self.profile["mode_name"])
 
+        has_saved_preset = bool(saved_state)
         all_sensors = self.p1_sensors + self.p2_sensors
 
-        for s in all_sensors:
+        for idx, s in enumerate(all_sensors):
             k = s["key"]
             sid = s["id"]
-
             if sid in saved_state:
                 s_cfg = saved_state[sid]
                 is_vis = s_cfg.get("visible", False)
                 axis_side = s_cfg.get("axis", "left")
                 is_move = s_cfg.get("move", False)
-
-                if k in self.sensor_checkboxes:
-                    self.sensor_checkboxes[k].blockSignals(True)
-                    self.sensor_checkboxes[k].setChecked(is_vis)
-                    self.sensor_checkboxes[k].blockSignals(False)
-
-                if k in self.side_buttons:
-                    self.toggle_axis_side(k, self.side_buttons[k], force_side=axis_side)
-
-                if k in self.move_buttons:
-                    self.toggle_sensor_move(k, self.move_buttons[k], force_state=is_move)
-
-                self.toggle_curve_visibility(k, is_vis)
             else:
-                if k in self.sensor_checkboxes:
-                    self.sensor_checkboxes[k].blockSignals(True)
-                    self.sensor_checkboxes[k].setChecked(False)
-                    self.sensor_checkboxes[k].blockSignals(False)
+                # Если пресет ещё не сохранялся, включаем первые основные датчики
+                is_vis = (idx < 3) if not has_saved_preset else False
+                axis_side = "left"
+                is_move = False
 
-                if k in self.side_buttons:
-                    self.toggle_axis_side(k, self.side_buttons[k], force_side="left")
-
-                if k in self.move_buttons:
-                    self.toggle_sensor_move(k, self.move_buttons[k], force_state=False)
-
-                self.toggle_curve_visibility(k, False)
+            if k in self.sensor_checkboxes:
+                self.sensor_checkboxes[k].blockSignals(True)
+                self.sensor_checkboxes[k].setChecked(is_vis)
+                self.sensor_checkboxes[k].blockSignals(False)
+            if k in self.side_buttons:
+                self.toggle_axis_side(k, self.side_buttons[k], force_side=axis_side)
+            if k in self.move_buttons:
+                self.toggle_sensor_move(k, self.move_buttons[k], force_state=is_move)
+            self.toggle_curve_visibility(k, is_vis)
 
     def seek_to_time(self, target_sec: float):
         self.current_time_cursor = max(0.0, min(self.total_duration, target_sec))
-        self.cursor_line_p1.setPos(self.current_time_cursor)
-        self.cursor_line_p2.setPos(self.current_time_cursor)
+        
+        # Если аудио играет, переносим текущий сэмпл воспроизведения на новое место клика
+        if self.engine:
+            self.engine.current_sample_idx = int(self.current_time_cursor * self.engine.sample_rate)
+
+        self.telemetry_panel.cursor_line_p1.setPos(self.current_time_cursor)
+        self.telemetry_panel.cursor_line_p2.setPos(self.current_time_cursor)
+        if self.engine:
+            self.audio_panel.cursor_line_audio.setPos(self.current_time_cursor)
+            self.compute_and_draw_fft_at(int(self.current_time_cursor * self.engine.sample_rate))
 
         all_sensors = self.p1_sensors + self.p2_sensors
         for s in all_sensors:
             k = s["key"]
             is_vis = k in self.sensor_checkboxes and self.sensor_checkboxes[k].isChecked()
             tag = self.intersection_tags.get(k)
-
             if is_vis:
                 series = TelemetryEngine.smooth_series(self.df[s["col"]], DEFAULT_SMOOTHING)
                 val_at_t = float(np.interp(self.current_time_cursor, self.time_data, series))
-
                 if "volt" in k.lower(): val_str = f"{val_at_t:.3f}"
                 elif "RPM" in s["label"] or "clock" in s["label"].lower(): val_str = f"{val_at_t:.0f}"
                 else: val_str = f"{val_at_t:.1f}"
-
                 if tag is not None:
                     tag.setVisible(True)
                     tag.setText(f" {val_str}")
@@ -694,14 +661,167 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
                 if tag is not None:
                     tag.setVisible(False)
 
+    def calculate_and_render_spectrogram(self):
+        if not self.engine: return
+        Sxx_db, f_min, f_max = self.engine.render_spectrogram_slice(0.0, self.total_duration)
+        if Sxx_db is not None:
+            self.spec_db_matrix = Sxx_db
+            self.spec_f_min = f_min
+            self.spec_f_max = f_max
+            colormap = pg.colormap.get('inferno')
+            self._spec_lut = colormap.getLookupTable(0.0, 1.0, 256)
+            self.audio_panel.img_overview.setLookupTable(self._spec_lut)
+            self.audio_panel.img_highres.setLookupTable(self._spec_lut)
+            spec_min_v, spec_max_v = np.percentile(Sxx_db, [5, 99.5])
+            self.audio_panel.img_overview.setImage(Sxx_db.T, levels=[spec_min_v, spec_max_v])
+            self.audio_panel.img_overview.setRect(QtCore.QRectF(0, f_min, self.total_duration, f_max - f_min))
+            self.audio_panel.plot_spec.setRange(xRange=[0, self.total_duration], yRange=[LIMIT_FREQ_MIN, self.engine.sample_rate / 2.0], padding=0)
+
+    def get_spec_db_at(self, t_sec: float, f_hz: float) -> float:
+        return self.engine.get_db_at_time_and_freq(t_sec, f_hz) if self.engine else 0.0
+
+    def render_current_view(self):
+        if not self.engine: return
+        x_range = self.audio_panel.plot_spec.plotItem.vb.viewRange()[0]
+        t_start, t_end = max(0.0, x_range[0]), min(self.total_duration, x_range[1])
+        span = t_end - t_start
+        Sxx_db, f_min, f_max = self.engine.render_spectrogram_slice(t_start, t_end)
+        if Sxx_db is not None:
+            spec_min_v, spec_max_v = np.percentile(Sxx_db, [5, 99.5])
+            self.audio_panel.img_highres.setImage(Sxx_db.T, levels=[spec_min_v, spec_max_v])
+            self.audio_panel.img_highres.setRect(QtCore.QRectF(t_start, f_min, span, f_max - f_min))
+
+    def toggle_freq_scale(self):
+        if self.freq_scale_mode == "Log":
+            self.freq_scale_mode = "Linear"
+            self.audio_panel.btn_scale.setText("Scale: Linear")
+            nyq = (self.engine.sample_rate / 2.0) if self.engine else 8000.0
+            self.audio_panel.plot_fft.setXRange(LIMIT_FREQ_MIN, nyq, padding=0)
+        else:
+            self.freq_scale_mode = "Log"
+            self.audio_panel.btn_scale.setText("Scale: Log")
+            nyq = (self.engine.sample_rate / 2.0) if self.engine else 8000.0
+            self.audio_panel.plot_fft.setXRange(np.log10(LIMIT_FREQ_MIN), np.log10(nyq), padding=0)
+
+        if self.engine:
+            with self.engine.filter_lock:
+                for filt in self.engine.active_filters:
+                    x_min = np.log10(filt['f_min']) if self.freq_scale_mode == "Log" else filt['f_min']
+                    x_max = np.log10(filt['f_max']) if self.freq_scale_mode == "Log" else filt['f_max']
+                    filt['top_item'].setRegion([x_min, x_max])
+            self.compute_and_draw_fft_at(self.engine.current_sample_idx)
+
+    def add_filter_from_fft(self, f_min, f_max, x_min, x_max):
+        f_min, f_max = max(1.0, float(f_min)), max(f_min + 5.0, float(f_max))
+        top_region = create_clean_region(x_min, x_max)
+        self.audio_panel.plot_fft.addItem(top_region, ignoreBounds=True)
+        bot_rect = create_clean_2d_rect_item(QtCore.QRectF(0, f_min, self.total_duration, f_max - f_min))
+        self.audio_panel.plot_spec.addItem(bot_rect, ignoreBounds=True)
+
+        filter_entry = {'t_min': None, 't_max': None, 'f_min': f_min, 'f_max': f_max, 'top_item': top_region, 'bottom_item': bot_rect}
+        if self.engine:
+            with self.engine.filter_lock:
+                self.engine.active_filters.append(filter_entry)
+            self.compute_and_draw_fft_at(self.engine.current_sample_idx)
+
+    def add_2d_spectrogram_filter(self, t_min, t_max, f_min, f_max):
+        f_min, f_max = max(1.0, float(f_min)), max(f_min + 5.0, float(f_max))
+        bot_rect = create_clean_2d_rect_item(QtCore.QRectF(t_min, f_min, t_max - t_min, f_max - f_min))
+        self.audio_panel.plot_spec.addItem(bot_rect, ignoreBounds=True)
+        x_min = np.log10(f_min) if self.freq_scale_mode == "Log" else f_min
+        x_max = np.log10(f_max) if self.freq_scale_mode == "Log" else f_max
+        top_region = create_clean_region(x_min, x_max)
+        self.audio_panel.plot_fft.addItem(top_region, ignoreBounds=True)
+
+        filter_entry = {'t_min': t_min, 't_max': t_max, 'f_min': f_min, 'f_max': f_max, 'top_item': top_region, 'bottom_item': bot_rect}
+        if self.engine:
+            with self.engine.filter_lock:
+                self.engine.active_filters.append(filter_entry)
+            self.compute_and_draw_fft_at(self.engine.current_sample_idx)
+
+    def remove_filter_at_pos(self, t_click, f_click, is_fft=False):
+        if not self.engine: return
+        target_idx = None
+        with self.engine.filter_lock:
+            for idx, filt in enumerate(self.engine.active_filters):
+                f_match = (filt['f_min'] <= f_click <= filt['f_max'])
+                if is_fft:
+                    if f_match: target_idx = idx; break
+                else:
+                    t_min = 0.0 if filt['t_min'] is None else filt['t_min']
+                    t_max = self.total_duration if filt['t_max'] is None else filt['t_max']
+                    if f_match and (t_min <= t_click <= t_max):
+                        target_idx = idx; break
+
+        if target_idx is not None:
+            with self.engine.filter_lock:
+                removed_filt = self.engine.active_filters.pop(target_idx)
+            self.audio_panel.plot_fft.removeItem(removed_filt['top_item'])
+            self.audio_panel.plot_spec.removeItem(removed_filt['bottom_item'])
+            self.compute_and_draw_fft_at(self.engine.current_sample_idx)
+        else:
+            self.clear_all_filters()
+
+    def clear_all_filters(self):
+        if not self.engine: return
+        with self.engine.filter_lock:
+            filters_to_remove = list(self.engine.active_filters)
+            self.engine.active_filters.clear()
+        for filt in filters_to_remove:
+            self.audio_panel.plot_fft.removeItem(filt['top_item'])
+            self.audio_panel.plot_spec.removeItem(filt['bottom_item'])
+        self.compute_and_draw_fft_at(self.engine.current_sample_idx)
+
+    def compute_and_draw_fft_at(self, sample_idx):
+        if not self.engine: return
+        for txt in self.audio_panel.peak_text_items:
+            txt.setText("")
+        x_coords, valid_db, peak_xs, peak_ys, peak_labels = self.engine.compute_fft_at(
+            sample_idx, self.freq_scale_mode, ISOLATE_FFT_ON_FILTER
+        )
+        if x_coords is not None:
+            self.audio_panel.fft_curve.setData(x_coords, valid_db)
+            self.audio_panel.peak_scatter.setData(peak_xs, peak_ys)
+            y_max_limit = self.audio_panel.spin_ymax.value() if hasattr(self.audio_panel, 'spin_ymax') else 40
+            for idx, (px, py, label) in enumerate(zip(peak_xs, peak_ys, peak_labels)):
+                if idx < len(self.audio_panel.peak_text_items):
+                    txt_item = self.audio_panel.peak_text_items[idx]
+                    txt_item.setText(label)
+                    txt_item.setPos(px, min(y_max_limit - 1, py + 3))
+
+    def update_playhead(self):
+        if self.engine and self.engine.is_playing:
+            cur_sec = self.engine.current_sample_idx / self.engine.sample_rate
+            self.seek_to_time(cur_sec)
+            
+            if not self.engine.is_playing and hasattr(self, 'audio_panel'):
+                self.audio_panel.btn_play.setText("▶ Play")
+                self.audio_panel.btn_play.setStyleSheet(BTN_GREEN_QSS)
+
+    def toggle_play(self):
+        if not self.engine: return
+        if not self.engine.is_playing:
+            self.engine.current_sample_idx = int(self.current_time_cursor * self.engine.sample_rate)
+
+        self.engine.is_playing = not self.engine.is_playing
+        if hasattr(self, 'audio_panel'):
+            if self.engine.is_playing:
+                self.audio_panel.btn_play.setText("❚❚ Pause")
+                self.audio_panel.btn_play.setStyleSheet(BTN_RED_QSS)
+            else:
+                self.audio_panel.btn_play.setText("▶ Play")
+                self.audio_panel.btn_play.setStyleSheet(BTN_GREEN_QSS)
+
+    def on_boost_changed(self, val):
+        if self.engine:
+            self.engine.boost_db = float(val)
+
     def add_time_region(self, t_min, t_max):
         from ui.styles import create_clean_region
         reg_p1 = create_clean_region(t_min, t_max)
         reg_p2 = create_clean_region(t_min, t_max)
-
-        self.p1_plot.addItem(reg_p1, ignoreBounds=True)
-        self.p2_plot.addItem(reg_p2, ignoreBounds=True)
-
+        self.telemetry_panel.p1_plot.addItem(reg_p1, ignoreBounds=True)
+        self.telemetry_panel.p2_plot.addItem(reg_p2, ignoreBounds=True)
         self.time_regions.append({'t_min': t_min, 't_max': t_max, 'item_p1': reg_p1, 'item_p2': reg_p2})
         self.populate_summary_table()
 
@@ -711,51 +831,50 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
             if reg['t_min'] <= t_click <= reg['t_max']:
                 target_idx = idx
                 break
-
         if target_idx is not None:
             removed = self.time_regions.pop(target_idx)
-            self.p1_plot.removeItem(removed['item_p1'])
-            self.p2_plot.removeItem(removed['item_p2'])
+            self.telemetry_panel.p1_plot.removeItem(removed['item_p1'])
+            self.telemetry_panel.p2_plot.removeItem(removed['item_p2'])
         else:
             self.clear_all_time_regions()
-
         self.populate_summary_table()
 
     def clear_all_time_regions(self):
         for reg in self.time_regions:
-            self.p1_plot.removeItem(reg['item_p1'])
-            self.p2_plot.removeItem(reg['item_p2'])
+            self.telemetry_panel.p1_plot.removeItem(reg['item_p1'])
+            self.telemetry_panel.p2_plot.removeItem(reg['item_p2'])
         self.time_regions.clear()
         self.populate_summary_table()
 
     def populate_summary_table(self):
-        smooth_val = self.spin_smooth.value() if hasattr(self, 'spin_smooth') else DEFAULT_SMOOTHING
+        smooth_val = self.telemetry_panel.spin_smooth.value() if hasattr(self.telemetry_panel, 'spin_smooth') else DEFAULT_SMOOTHING
         rows, ranges_title = TelemetryEngine.compute_summary_rows(
             self.df, self.col_time, self.time_regions,
             self.p1_sensors, self.p2_sensors, None,
             smoothing_window=smooth_val
         )
-
         if self.time_regions:
-            self.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#00E5FF; font-size:7.5pt;'>({ranges_title})</span>")
+            self.sidebar.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#00E5FF; font-size:7.5pt;'>({ranges_title})</span>")
         else:
-            self.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({self.profile['mode_name']} Total)</span>")
+            self.sidebar.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({self.profile['mode_name']} Total)</span>")
 
-        self.table_summary.setRowCount(len(rows))
+        self.sidebar.table_summary.setRowCount(len(rows))
         for r_idx, (m, mn, mx, av) in enumerate(rows):
             item_m = QtWidgets.QTableWidgetItem(m)
             item_mn = QtWidgets.QTableWidgetItem(mn)
             item_mx = QtWidgets.QTableWidgetItem(mx)
             item_av = QtWidgets.QTableWidgetItem(av)
-
             item_mn.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             item_mx.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             item_av.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.sidebar.table_summary.setItem(r_idx, 0, item_m)
+            self.sidebar.table_summary.setItem(r_idx, 1, item_mn)
+            self.sidebar.table_summary.setItem(r_idx, 2, item_mx)
+            self.sidebar.table_summary.setItem(r_idx, 3, item_av)
 
-            self.table_summary.setItem(r_idx, 0, item_m)
-            self.table_summary.setItem(r_idx, 1, item_mn)
-            self.table_summary.setItem(r_idx, 2, item_mx)
-            self.table_summary.setItem(r_idx, 3, item_av)
+    def apply_initial_visibility(self):
+        for s in self.p1_sensors + self.p2_sensors:
+            self.toggle_curve_visibility(s["key"], s.get("visible", True))
 
     def update_plots_data(self):
         t_res = TelemetryEngine.get_resampled_time(self.time_data, self.current_step)
@@ -775,27 +894,13 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
             return mn - pad, mx + pad
 
         if reset_x:
-            self.vb1.setXRange(0.0, self.total_duration, padding=0)
+            self.telemetry_panel.vb1.setXRange(0.0, self.total_duration, padding=0)
 
         for s in self.p1_sensors + self.p2_sensors:
             k = s["key"]
             mn, mx = compute_limits(s["col"])
-            if mn is None or mx is None:
-                continue
+            if mn is None or mx is None: continue
             self.sensor_y_limits[k] = [mn, mx]
-            if k in self.viewboxes_map:
-                self.viewboxes_map[k].setYRange(mn, mx, padding=0)
-                cur_side = self.sensor_sides.get(k, "left")
-                target_axis = self.axes_map[k][cur_side]
-                target_axis.picture = None
-                target_axis.setRange(mn, mx)
-                target_axis.update()
-
-        for s in self.p1_sensors + self.p2_sensors:
-            k = s["key"]
-            mn, mx = compute_limits(s["col"])
-            if k not in self.sensor_y_limits:
-                self.sensor_y_limits[k] = [mn, mx]
             if k in self.viewboxes_map:
                 self.viewboxes_map[k].setYRange(mn, mx, padding=0)
                 cur_side = self.sensor_sides.get(k, "left")
@@ -809,25 +914,23 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
         DEFAULT_SMOOTHING = max(1, val)
         t_full = self.time_data
         t_res = TelemetryEngine.get_resampled_time(self.time_data, self.current_step)
-
         for s in self.p1_sensors + self.p2_sensors:
             k = s["key"]
             raw_series = TelemetryEngine.smooth_series(self.df[s["col"]], DEFAULT_SMOOTHING)
             trend_data = TelemetryEngine.resample_series(self.df[s["col"]], self.current_step)
             self.curves[f"{k}_raw"].setData(t_full, raw_series)
             self.curves[f"{k}_trend"].setData(t_res, trend_data)
-
         self.populate_summary_table()
         self.seek_to_time(self.current_time_cursor)
 
     def on_step_changed(self, val):
         self.current_step = max(1, val)
         if self.current_step > 1:
-            self.spin_raw.setValue(0.25)
-            self.spin_trend.setValue(1.00)
+            self.telemetry_panel.spin_raw.setValue(0.25)
+            self.telemetry_panel.spin_trend.setValue(1.00)
         else:
-            self.spin_raw.setValue(1.00)
-            self.spin_trend.setValue(0.00)
+            self.telemetry_panel.spin_raw.setValue(1.00)
+            self.telemetry_panel.spin_trend.setValue(0.00)
         self.update_plots_data()
 
     def on_raw_alpha_changed(self, val):
@@ -842,25 +945,36 @@ class CoolingAnalyzerPro(QtWidgets.QMainWindow):
 
     def toggle_y_fit(self):
         self.y_fit_mode = "Trend" if self.y_fit_mode == "Raw" else "Raw"
-        self.btn_fit.setText(f"Fit: {self.y_fit_mode}")
+        self.telemetry_panel.btn_fit.setText(f"Fit: {self.y_fit_mode}")
         self.update_y_limits()
 
     def save_result_action(self):
         QtWidgets.QApplication.processEvents()
-        TelemetryEngine.export_summary_and_chart(
+        TelemetryEngine.export_summary_csv(
             summary_dir=self.summary_dir,
-            chart_filepath=self.chart_filepath,
             summary_filepath=self.summary_filepath,
-            p1_plot=self.p1_plot,
-            p2_plot=self.p2_plot,
             df=self.df,
             time_data=self.time_data,
             current_step=self.current_step,
             export_sensors=self.profile["export_sensors"],
             get_col_fn=lambda sid: TelemetryEngine.find_column_by_sensor_id(self.df, sid)
         )
-        print(f"\n[SUCCESS] Hi-Res JPG chart saved to : {self.chart_filepath}")
-        print(f"[SUCCESS] Evolution CSV report saved to : {self.summary_filepath} (Avg Step: {self.current_step})\n")
+        print(f"[SUCCESS] Exported CSV to: {self.summary_filepath}")
+        
+        # Визуальное подтверждение на кнопке
+        if hasattr(self, 'telemetry_panel') and hasattr(self.telemetry_panel, 'btn_save'):
+            self.telemetry_panel.btn_save.setText("CSV Saved")
+            QtCore.QTimer.singleShot(2000, lambda: self.telemetry_panel.btn_save.setText("Save Result"))
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key.Key_Space:
+            self.toggle_play()
+            event.accept()
+        elif event.key() == QtCore.Qt.Key.Key_Escape:
+            self.clear_all_time_regions()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
 
 # =======================================================
@@ -871,7 +985,8 @@ if __name__ == '__main__':
         print(f"Error: Directory '{LOGS_DIR}' not found!")
         sys.exit(1)
 
-    hw_model_name = "Hardware"
+    cpu_name = "CPU"
+    gpu_name = "GPU"
     if os.path.exists(HW_INFO_FILE):
         try:
             with open(HW_INFO_FILE, "r", encoding="utf-8") as f:
@@ -879,8 +994,11 @@ if __name__ == '__main__':
                 for comp in hw_info.get("components", []):
                     c_name = comp.get("name", "")
                     c_lower = c_name.lower()
-                    if any(x in c_lower for x in ["ryzen", "core i", "threadripper", "rtx", "gtx", "geforce", "radeon"]):
-                        hw_model_name = c_name
+                    if any(x in c_lower for x in ["ryzen", "core i", "threadripper", "xeon", "intel core", "amd"]):
+                        if "radeon" not in c_lower:
+                            cpu_name = c_name
+                    if any(x in c_lower for x in ["rtx", "gtx", "geforce", "radeon", "intel arc", "nvidia"]):
+                        gpu_name = c_name
         except Exception:
             pass
 
@@ -890,7 +1008,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     print("="*60)
-    print("         COOLING ANALYZER SUITE         ")
+    print("         PC COOLING STUDIO SUITE         ")
     print("="*60)
     for idx, f in enumerate(files):
         print(f"  [{idx + 1}] {f}")
@@ -902,14 +1020,25 @@ if __name__ == '__main__':
     selected_file = files[file_idx]
     file_path = os.path.join(LOGS_DIR, selected_file)
 
+    # Автоматически ищем парный аудиофайл по имени лога
+    audio_file_name = selected_file.replace("table_raw_", "audio_raw_").replace(".csv", ".mp3")
+    audio_path = os.path.join(LOGS_DIR, audio_file_name)
+    if not os.path.exists(audio_path):
+        audio_file_name_wav = selected_file.replace("table_raw_", "audio_raw_").replace(".csv", ".wav")
+        audio_path = os.path.join(LOGS_DIR, audio_file_name_wav)
+        if not os.path.exists(audio_path):
+            audio_path = None
+
     try:
         df, _ = TelemetryEngine.load_log_file(file_path, TIME_START, TIME_END)
         print(f"\nAnalyzing: {selected_file} ({len(df)} samples)")
+        if audio_path:
+            print(f"Paired Audio: {os.path.basename(audio_path)}")
     except Exception as e:
         print(f"Error reading CSV file: {e}")
         sys.exit(1)
 
     app = QtWidgets.QApplication(sys.argv)
-    window = CoolingAnalyzerPro(df, selected_file, hw_model_name)
+    window = StudioSuiteWindow(df, selected_file, cpu_name=cpu_name, gpu_name=gpu_name, audio_path=audio_path)
     window.show()
     sys.exit(app.exec())

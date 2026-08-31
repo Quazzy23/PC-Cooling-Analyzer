@@ -182,7 +182,7 @@ def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH
         "summary_dir_name": summary_dir,
         "chart_title_prefix": chart_title,
         "panel1_sensors": p1_sensors,
-        "panel2_title": "2. Cooling Hardware Speeds & Sound Level",
+        "panel2_title": "Cooling Hardware Speeds & Sound Level",
         "panel2_sensors": p2_sensors,
         "export_sensors": export_sensors
     }
