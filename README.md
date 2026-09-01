@@ -36,7 +36,7 @@ Download [LibreHardwareMonitor](https://github.com/LibreHardwaRemonitor/LibreHar
 ### 3. Install Dependencies
 Ensure **Python 3.10+** is installed, then install dependencies:
 ```bash
-pip install numpy scipy pandas requests pyqt6 pyqtgraph sounddevice soundfile lameenc uiautomation pynput
+pip install numpy scipy pandas requests pyqt6 pyqtgraph sounddevice soundfile lameenc uiautomation pynput pythonnet
 ```
 
 ### 4. Setup LHM Path & Map Sensors
@@ -51,6 +51,9 @@ Run `logger.py` to record telemetry to CSV and synchronized audio to MP3.
 ### 7. Run Analysis
 Run `analyzer.py` and select the target CSV log to inspect interactive charts, summary metrics, and export reports.
 
+### 8. Fan Speed Sweep (Alpha feature)
+Run `utils/fan_control/find_fans.py` to discover available fan control headers. Configure sweep options in `utils/fan_control/sweep_test.py` under the `TEST CONFIGURATION` block. Run `utils/fan_control/sweep_test.py` to sweep fan speed. Live RPM can be verified in real time using tools like OCCT or LibreHardwareMonitor.
+
 ---
 
 ## 📁 Repository Structure
@@ -58,7 +61,7 @@ Run `analyzer.py` and select the target CSV log to inspect interactive charts, s
 Currently, this repository hosts the codebase required to run the benchmarking pipeline:
 * `/core` — Data processing engines (telemetry smoothing, metrics, audio DSP, FFT).
 * `/ui` — Stylesheets, custom axes, and the unified interactive ViewBox engine.
-* `/utils` — LHM client, sensor config wizard, mic configuration, and setup scripts.
+* `/utils` — LHM client, sensor config wizard, mic setup, and fan control scripts (`/fan_control`).
 * `analyzer.py` & `logger.py` — The primary executable interfaces.
 
 ---
