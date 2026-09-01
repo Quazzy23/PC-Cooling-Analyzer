@@ -45,91 +45,55 @@ def determine_default_axis(label_name: str) -> str:
 
 
 def get_available_profiles(config_path: str = DEFAULT_CONFIG_PATH) -> list:
-    """Возвращает список доступных профилей из sensors_config.json + режим ALL"""
+    """Возвращает список реальных доступных профилей из sensors_config.json"""
     if not os.path.exists(config_path):
-        return ["CPU", "GPU", "ALL"]
+        return ["CPU", "GPU"]
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        modes = [k for k in data.keys() if k not in ("active_mode",)]
-        if "ALL" not in modes:
-            modes.append("ALL")
-        return modes
+        modes = [k for k in data.keys() if k != "active_mode"]
+        return modes if modes else ["CPU", "GPU"]
     except Exception:
-        return ["CPU", "GPU", "ALL"]
+        return ["CPU", "GPU"]
 
 
 def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH) -> dict:
-    """Загружает профиль датчиков (CPU, GPU или комбинированный ALL с дедупликацией)"""
+    """Загружает конкретный профиль датчиков (CPU, GPU, RAM и др.) с учетом поля order"""
+    saved_active = load_last_active_mode()
+    target_mode = (mode or saved_active or "CPU").upper()
+
     if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Sensor configuration file not found: {config_path}")
+        return {
+            "mode_name": target_mode,
+            "summary_dir_name": target_mode.lower(),
+            "chart_title_prefix": f"{target_mode} Thermal & Electrical Load Dynamics",
+            "panel1_sensors": [],
+            "panel2_title": "Cooling Hardware Speeds & Sound Level",
+            "panel2_sensors": [],
+            "export_sensors": []
+        }
 
     with open(config_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except Exception:
+            data = {}
 
-    # Определяем режим
-    saved_active = load_last_active_mode()
-    target_mode = (mode or saved_active or data.get("active_mode", "CPU")).upper()
+    target_mode = (mode or saved_active or "CPU").upper()
 
     p1_sensors = []
     p2_sensors = []
     export_sensors = []
     seen_sids = set()
 
-    # --- РЕЖИМ ALL (Объединение всех профилей без дубликатов) ---
-    if target_mode == "ALL":
-        all_modes = [k for k in data.keys() if k not in ("active_mode",)]
-        
-        # Собираем P1 со всех профилей
-        for m_key in all_modes:
-            m_data = data.get(m_key, {})
-            raw_p1 = m_data.get("panel1_thermal_and_power") or m_data.get("P1_thermal_and_power") or []
-            for item in raw_p1:
-                sid = str(item.get("id", "")).strip()
-                if sid and sid not in seen_sids:
-                    seen_sids.add(sid)
-                    idx = len(p1_sensors)
-                    name = item.get("name", f"Sensor P1_{idx+1}")
-                    p1_sensors.append({
-                        "key": f"p1_{idx+1}",
-                        "id": sid,
-                        "label": name,
-                        "color": P1_PALETTE[idx % len(P1_PALETTE)],
-                        "axis": "left",
-                        "visible": False
-                    })
-                    export_sensors.append((name, sid))
+    mode_data = data.get(target_mode, {})
 
-        # Собираем P2 со всех профилей
-        for m_key in all_modes:
-            m_data = data.get(m_key, {})
-            raw_p2 = m_data.get("panel2_cooling_and_speed") or m_data.get("P2_cooling_and_speed") or []
-            for item in raw_p2:
-                sid = str(item.get("id", "")).strip()
-                if sid and sid not in seen_sids:
-                    seen_sids.add(sid)
-                    idx = len(p2_sensors)
-                    name = item.get("name", f"Fan {idx+1}")
-                    p2_sensors.append({
-                        "key": f"p2_{idx+1}",
-                        "id": sid,
-                        "label": name,
-                        "color": P2_PALETTE[idx % len(P2_PALETTE)],
-                        "axis": "left",
-                        "visible": False
-                    })
-                    export_sensors.append((name, sid))
-
-        summary_dir = "all"
-        chart_title = "Full System Thermal & Electrical Load Dynamics"
-
-    # --- СТАНДАРТНЫЙ РЕЖИМ (CPU или GPU) ---
-    else:
-        mode_data = data.get(target_mode, data.get("CPU", {}))
-        
-        raw_p1 = mode_data.get("panel1_thermal_and_power") or mode_data.get("P1_thermal_and_power") or []
-        for idx, item in enumerate(raw_p1):
-            sid = str(item.get("id", "")).strip()
+    raw_p1 = mode_data.get("panel1_thermal_and_power") or mode_data.get("P1_thermal_and_power") or []
+    raw_p1 = sorted(raw_p1, key=lambda x: x.get("order", 999))
+    for idx, item in enumerate(raw_p1):
+        sid = str(item.get("id", "")).strip()
+        if sid and sid not in seen_sids:
+            seen_sids.add(sid)
             name = item.get("name", f"Sensor P1_{idx+1}")
             p1_sensors.append({
                 "key": f"p1_{idx+1}",
@@ -141,9 +105,12 @@ def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH
             })
             export_sensors.append((name, sid))
 
-        raw_p2 = mode_data.get("panel2_cooling_and_speed") or mode_data.get("P2_cooling_and_speed") or []
-        for idx, item in enumerate(raw_p2):
-            sid = str(item.get("id", "")).strip()
+    raw_p2 = mode_data.get("panel2_cooling_and_speed") or mode_data.get("P2_cooling_and_speed") or []
+    raw_p2 = sorted(raw_p2, key=lambda x: x.get("order", 999))
+    for idx, item in enumerate(raw_p2):
+        sid = str(item.get("id", "")).strip()
+        if sid and sid not in seen_sids:
+            seen_sids.add(sid)
             name = item.get("name", f"Fan {idx+1}")
             p2_sensors.append({
                 "key": f"p2_{idx+1}",
@@ -155,10 +122,10 @@ def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH
             })
             export_sensors.append((name, sid))
 
-        summary_dir = mode_data.get("summary_dir_name", target_mode.lower())
-        chart_title = mode_data.get("chart_title_prefix", f"{target_mode} Thermal & Electrical Load Dynamics")
+    summary_dir = mode_data.get("summary_dir_name", target_mode.lower())
+    chart_title = mode_data.get("chart_title_prefix", f"{target_mode} Thermal & Electrical Load Dynamics")
 
-    # Авто-добавление микрофона в конец P2 (ровно 1 раз, цвет по порядку из P2_PALETTE)
+    # Авто-добавление микрофона в конец P2 (если включено в audio_config.json)
     if os.path.exists(AUDIO_CONFIG_PATH) and "/audio/0/sound/0" not in seen_sids:
         try:
             with open(AUDIO_CONFIG_PATH, "r", encoding="utf-8") as af:

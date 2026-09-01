@@ -113,7 +113,7 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         elif self.current_mode == "GPU":
             return self.gpu_name
         else:
-            return f"{self.cpu_name} & {self.gpu_name}"
+            return f"{self.cpu_name} | {self.gpu_name}"
 
     def update_report_paths(self):
         self.summary_dir = os.path.join(RESULTS_DIR, "summary_reports", self.profile["summary_dir_name"])
@@ -602,10 +602,9 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         if saved_state is None:
             saved_state = load_user_view_state(self.profile["mode_name"])
 
-        has_saved_preset = bool(saved_state)
         all_sensors = self.p1_sensors + self.p2_sensors
 
-        for idx, s in enumerate(all_sensors):
+        for s in all_sensors:
             k = s["key"]
             sid = s["id"]
             if sid in saved_state:
@@ -614,8 +613,8 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
                 axis_side = s_cfg.get("axis", "left")
                 is_move = s_cfg.get("move", False)
             else:
-                # Если пресет ещё не сохранялся, включаем первые основные датчики
-                is_vis = (idx < 3) if not has_saved_preset else False
+                # По умолчанию все датчики строго выключены, пока пользователь сам не поставит галочку
+                is_vis = False
                 axis_side = "left"
                 is_move = False
 
@@ -1008,7 +1007,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     print("="*60)
-    print("         PC COOLING STUDIO SUITE         ")
+    print("         PC COOLING ALALYZER         ")
     print("="*60)
     for idx, f in enumerate(files):
         print(f"  [{idx + 1}] {f}")

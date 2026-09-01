@@ -1,5 +1,6 @@
 """
 Главный универсальный логгер телеметрии датчиков и синхронной аудиозаписи
+Стандартный чистый консольный вывод (без сторонних библиотек).
 """
 import os
 import sys
@@ -15,9 +16,9 @@ from utils.lhm_client import (
     LHM_URL, ensure_lhm_running, close_lhm_process,
     flatten_json_tree, extract_hardware_structure
 )
-from core.defaults import load_sensor_profile, AUDIO_PROFILE
+from core.defaults import get_available_profiles, load_sensor_profile, AUDIO_PROFILE
 
-# Включаем ANSI-эскейп коды в Windows-терминале для живой таблицы
+# Включаем поддержку ANSI-последовательностей в Windows
 os.system("")
 
 # ================= CONFIGURATION =================
@@ -37,22 +38,21 @@ CSV_FILENAME = os.path.join(LOGS_DIR, f"table_raw_{POSTFIX}.csv")
 HW_INFO_FILENAME = os.path.join(SYS_INFO_DIR, "hardware_info.json")
 AUDIO_CFG_FILE = os.path.join(SYS_INFO_DIR, "audio_config.json")
 
-# Датчики для отображения в консоли автоматически подтягиваем из профилей
-cpu_prof = load_sensor_profile("CPU")
-gpu_prof = load_sensor_profile("GPU")
+# Загрузка всех настроенных профилей (CPU, GPU и др.)
+all_modes = [m for m in get_available_profiles() if m != "ALL"]
+profile_sensors = {}
 
-ID_CPU_TEMP  = cpu_prof["panel1_sensors"][0]["id"] if len(cpu_prof["panel1_sensors"]) > 0 else None
-ID_CPU_POWER = cpu_prof["panel1_sensors"][2]["id"] if len(cpu_prof["panel1_sensors"]) > 2 else None
-ID_CPU_LOAD  = cpu_prof["panel1_sensors"][3]["id"] if len(cpu_prof["panel1_sensors"]) > 3 else None
-ID_CPU_PUMP  = cpu_prof["panel2_sensors"][0]["id"] if len(cpu_prof["panel2_sensors"]) > 0 else None
+for mode in all_modes:
+    prof = load_sensor_profile(mode)
+    s_list = []
+    for s in prof.get("panel1_sensors", []) + prof.get("panel2_sensors", []):
+        if s["id"] != "/audio/0/sound/0":
+            s_list.append(s)
+    if s_list:
+        profile_sensors[mode] = s_list
 
-ID_GPU_TEMP  = gpu_prof["panel1_sensors"][0]["id"] if len(gpu_prof["panel1_sensors"]) > 0 else None
-ID_GPU_POWER = gpu_prof["panel1_sensors"][2]["id"] if len(gpu_prof["panel1_sensors"]) > 2 else None
-ID_GPU_LOAD  = gpu_prof["panel1_sensors"][3]["id"] if len(gpu_prof["panel1_sensors"]) > 3 else None
-ID_GPU_FAN   = gpu_prof["panel2_sensors"][0]["id"] if len(gpu_prof["panel2_sensors"]) > 0 else None
 # ================================================
 
-# Проверяем поддержку MP3 кодирования
 try:
     import lameenc
     HAS_LAME = True
@@ -76,7 +76,6 @@ class AudioRecorder:
         self.audio_file = None
 
         if not os.path.exists(cfg_path):
-            print("[INFO] Audio config not found. Run 'python select_mic.py' to enable noise logging.")
             return
 
         try:
@@ -84,7 +83,6 @@ class AudioRecorder:
                 acfg = json.load(f)
 
             if not acfg.get("audio_logging_enabled", False):
-                print("[INFO] Audio logging is disabled in 'system_info/audio_config.json'.")
                 return
 
             saved_idx = acfg.get("device_index")
@@ -92,7 +90,6 @@ class AudioRecorder:
             self.mic_name = saved_name
             cal_offset = float(acfg.get("calibration_offset", AUDIO_PROFILE.get("calibration_offset", 90.0)))
 
-            # Поиск устройства: сначала по сохраненному индексу, затем по имени
             devices = sd.query_devices()
             target_idx = None
 
@@ -105,14 +102,12 @@ class AudioRecorder:
                         break
 
             if target_idx is None:
-                # Если сохраненный микрофон не найден, берем дефолтный системный
                 default_in = sd.default.device[0]
                 if default_in is not None and default_in >= 0:
                     target_idx = default_in
                     self.mic_name = devices[target_idx]['name']
 
             if target_idx is None:
-                print("[WARNING] No suitable microphone input device found!")
                 return
 
             dev_info = sd.query_devices(target_idx)
@@ -133,12 +128,10 @@ class AudioRecorder:
                 self.audio_file.setframerate(sr)
 
             def audio_callback(indata, frames, time_info, status):
-                # Извлекаем первый канал для моно-расчета dBA и записи
                 mono_sig = indata[:, 0] if indata.ndim > 1 else indata
                 sig = np.nan_to_num(mono_sig, nan=0.0, posinf=0.0, neginf=0.0)
                 sig = np.clip(sig, -1.0, 1.0)
 
-                # Расчет RMS и перевод в dBA
                 rms = np.sqrt(np.mean(sig**2) + 1e-12)
                 db = 20.0 * np.log10(rms) + cal_offset
                 self.current_sound_dba = max(0.0, round(float(db), 1))
@@ -160,9 +153,8 @@ class AudioRecorder:
             )
             self.stream.start()
             self.is_active = True
-            print(f"[OK] Background audio stream active: {self.mic_name[:30]} ({AUDIO_EXT})")
-        except Exception as e:
-            print(f"[WARNING] Could not start audio stream: {e}")
+        except Exception:
+            pass
 
     def close(self):
         if self.stream is not None:
@@ -177,56 +169,31 @@ class AudioRecorder:
                 if tail:
                     self.audio_file.write(tail)
                 self.audio_file.close()
-                print(f"[SUCCESS] Audio MP3 saved to: {self.filename}")
             except Exception: pass
         elif self.audio_file:
             try:
                 self.audio_file.close()
-                print(f"[SUCCESS] Audio WAV saved to: {self.filename}")
-            except Exception: pass
-
-    def close(self):
-        if self.stream is not None:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception: pass
-
-        if HAS_LAME and self.mp3_encoder and self.audio_file:
-            try:
-                tail = self.mp3_encoder.flush()
-                if tail:
-                    self.audio_file.write(tail)
-                self.audio_file.close()
-                print(f"[SUCCESS] Audio MP3 saved to: {self.filename}")
-            except Exception: pass
-        elif self.audio_file:
-            try:
-                self.audio_file.close()
-                print(f"[SUCCESS] Audio WAV saved to: {self.filename}")
             except Exception: pass
 
 
-# 1. Автозапуск LibreHardwareMonitor при необходимости
+# 1. Автозапуск LibreHardwareMonitor
 ensure_lhm_running()
 
 # 2. Подключение к Web API
-print(f"Connecting to LibreHardwareMonitor Web Server at {LHM_URL}...")
 session = requests.Session()
 try:
     res = session.get(LHM_URL, timeout=2.0)
     res.raise_for_status()
     raw_json = res.json()
-    print("[OK] Connected to LibreHardwareMonitor application successfully!")
 except Exception as e:
     print(f"\n[ERROR] Could not connect to LibreHardwareMonitor at {LHM_URL}")
     print("Ensure LibreHardwareMonitor.exe is running and 'Remote Web Server' is enabled.")
     sys.exit(1)
 
-# 3. Инициализация фоновой аудиозаписи
+# 3. Инициализация аудиозаписи
 recorder = AudioRecorder(AUDIO_FILENAME, AUDIO_CFG_FILE)
 
-# 4. Сохранение паспорта оборудования (hardware_info.json)
+# 4. Сохранение паспорта оборудования
 pc_name, hardware_components = extract_hardware_structure(raw_json)
 system_metadata = {
     "computer_name": pc_name,
@@ -240,12 +207,15 @@ with open(HW_INFO_FILENAME, "w", encoding="utf-8") as hw_file:
 sensor_map = {}
 flatten_json_tree(raw_json, sensor_map)
 print(f"\n[OK] Discovery complete. Total active sensors found: {len(sensor_map)}")
+print("Monitored Profiles:")
+for mode, s_list in profile_sensors.items():
+    print(f" • [{mode}]: {len(s_list)} sensors")
 print(f"Host PC: {pc_name}")
 for hw in hardware_components:
     print(f" • {hw['name']}")
 print()
 
-# 6. Формирование двухстрочного заголовка CSV
+# 6. Заголовки CSV
 row_names = ["Time_Sec"]
 row_ids   = ["TIME_SEC"]
 active_sensor_ids = []
@@ -266,12 +236,13 @@ print("Press Ctrl+C to stop logging.\n")
 
 start_time = time.time()
 first_run = True
+prev_line_count = 0
 
 # 7. Главный цикл логирования
 with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(row_names)  # Строка 1: Имена
-    writer.writerow(row_ids)    # Строка 2: SensorID
+    writer.writerow(row_names)
+    writer.writerow(row_ids)
     file.flush()
 
     try:
@@ -289,6 +260,7 @@ with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as file:
             curr_sensor_map = {}
             flatten_json_tree(curr_json, curr_sensor_map)
 
+            # Запись полной строки всех датчиков в CSV
             row_data = [round(elapsed, 2)]
             for sid in active_sensor_ids:
                 val = curr_sensor_map.get(sid, {}).get("value")
@@ -299,53 +271,69 @@ with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as file:
 
             writer.writerow(row_data)
 
-            # Извлечение ключевых метрик для консольной таблицы
-            cpu_temp = curr_sensor_map.get(ID_CPU_TEMP, {}).get("value")
-            cpu_pwr  = curr_sensor_map.get(ID_CPU_POWER, {}).get("value")
-            cpu_load = curr_sensor_map.get(ID_CPU_LOAD, {}).get("value")
-            cpu_pump = curr_sensor_map.get(ID_CPU_PUMP, {}).get("value")
+            # Формирование строк вывода
+            out_lines = []
 
-            gpu_temp = curr_sensor_map.get(ID_GPU_TEMP, {}).get("value")
-            gpu_pwr  = curr_sensor_map.get(ID_GPU_POWER, {}).get("value")
-            gpu_load = curr_sensor_map.get(ID_GPU_LOAD, {}).get("value")
-            gpu_fan  = curr_sensor_map.get(ID_GPU_FAN, {}).get("value")
+            for mode, sensors in profile_sensors.items():
+                out_lines.append(f"{f'[{mode}]':<36} {'VALUE':>12}")
+                out_lines.append("-" * 50)
 
-            cpu_t_str = f"{cpu_temp:.1f} C" if cpu_temp is not None else "N/A C"
-            cpu_p_str = f"{cpu_pwr:.1f} W" if cpu_pwr is not None else "N/A W"
-            cpu_l_str = f"{cpu_load:.1f} %" if cpu_load is not None else "N/A %"
-            cpu_s_str = f"{cpu_pump:.0f} RPM" if cpu_pump is not None else "N/A RPM"
+                for s in sensors:
+                    label = s["label"]
+                    clean_label = label[:36]
+                    val = curr_sensor_map.get(s["id"], {}).get("value")
 
-            gpu_t_str = f"{gpu_temp:.1f} C" if gpu_temp is not None else "N/A C"
-            gpu_p_str = f"{gpu_pwr:.1f} W" if gpu_pwr is not None else "N/A W"
-            gpu_l_str = f"{gpu_load:.1f} %" if gpu_load is not None else "N/A %"
-            gpu_s_str = f"{gpu_fan:.0f} RPM" if gpu_fan is not None else "N/A RPM"
+                    if val is None:
+                        val_str = "N/A"
+                    else:
+                        l_lower = label.lower()
+                        if "volt" in l_lower or "(v)" in l_lower:
+                            val_str = f"{val:.3f}"
+                        elif "rpm" in l_lower or "clock" in l_lower or "mhz" in l_lower:
+                            val_str = f"{val:.0f}"
+                        else:
+                            val_str = f"{val:.1f}"
 
-            sound_line = f"Sound Level: {recorder.current_sound_dba:.1f} dBA ({recorder.mic_name[:22]})\n" if (recorder.is_active and recorder.current_sound_dba is not None) else ""
+                    out_lines.append(f"{clean_label:<36} {val_str:>12}")
 
-            out_text = (
-                f"HARDWARE  | TEMP (C) | POWER (W) | LOAD (%) | SPEED (RPM)\n"
-                f"---------------------------------------------------------\n"
-                f"CPU       | {cpu_t_str:>8} | {cpu_p_str:>9} | {cpu_l_str:>8} | {cpu_s_str:>11}\n"
-                f"GPU       | {gpu_t_str:>8} | {gpu_p_str:>9} | {gpu_l_str:>8} | {gpu_s_str:>11}\n"
-                f"---------------------------------------------------------\n"
-                f"{sound_line}"
-                f"Elapsed Time: {elapsed:6.1f}s"
-            )
+                out_lines.append("")
 
-            num_ansi_lines = 7 if (recorder.is_active and recorder.current_sound_dba is not None) else 6
+            # Блок уровня звука
+            if recorder.is_active:
+                if recorder.current_sound_dba is not None:
+                    snd_str = f"{recorder.current_sound_dba:>12.1f}"
+                else:
+                    snd_str = f"{'--.-':>12}"
+                out_lines.append(f"{'Sound Level (dBA)':<36} {snd_str}")
+                out_lines.append("-" * 50)
 
+            out_lines.append(f"{'Elapsed Time (s)':<36} {elapsed:>12.1f}")
+            out_lines.append("-" * 50)
+            out_lines.append("Press Ctrl+C to stop logging.")
+
+            # Каждая строка снабжается маркером очистки остатка \033[K
+            formatted_block = "\n".join(f"{line}\033[K" for line in out_lines)
+            current_line_count = len(out_lines)
+
+            # Перемещение курсора на начало блока и перезапись
             if not first_run:
-                print(f"\033[{num_ansi_lines}A\033[J", end="", flush=True)
+                sys.stdout.write(f"\r\033[{prev_line_count - 1}A")
             else:
                 first_run = False
 
-            print(out_text, flush=True)
+            sys.stdout.write(formatted_block)
+            sys.stdout.flush()
+            prev_line_count = current_line_count
 
             exec_time = time.time() - t0
             time.sleep(max(0.0, INTERVAL - exec_time))
 
     except KeyboardInterrupt:
-        print("\n\nLogging stopped by user.")
+        sys.stdout.write("\n\n")
+        print("[STOP] Logging stopped by user.")
+        print(f"[SUCCESS] Telemetry CSV saved to: {CSV_FILENAME}")
+        if recorder.is_active:
+            print(f"[SUCCESS] Audio recording saved to: {AUDIO_FILENAME}")
     finally:
         recorder.close()
         if CLOSE_LHM_ON_EXIT == 1:

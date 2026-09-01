@@ -19,14 +19,18 @@ FALLBACK_LHM_EXE_PATH = r"C:\Program Files\LibreHardwareMonitor\LibreHardwareMon
 
 
 def get_lhm_exe_path() -> str:
-    """Считывает путь к LibreHardwareMonitor.exe из простого текстового файла lhm_path.txt"""
-    # 1. Читаем из простого текстового файла с обычными одиночными слэшами \
+    """Считывает путь к LibreHardwareMonitor.exe (поддерживает путь к папке или к файлу)"""
     if os.path.exists(LHM_PATH_FILE):
         try:
             with open(LHM_PATH_FILE, "r", encoding="utf-8") as f:
                 path = f.read().strip().strip('"').strip("'")
                 if path and not path.startswith("<"):
-                    return os.path.normpath(path)
+                    norm = os.path.normpath(path)
+                    if os.path.isdir(norm):
+                        candidate = os.path.join(norm, "LibreHardwareMonitor.exe")
+                        if os.path.exists(candidate):
+                            return candidate
+                    return norm
         except Exception:
             pass
 
@@ -58,35 +62,37 @@ def clean_sensor_value(val_str):
 
 
 def ensure_lhm_running(exe_path: str = None, url: str = LHM_URL):
-    """Проверяет доступность LHM API и запускает процесс с правами админа при необходимости"""
+    """Проверяет доступность LHM API и запускает процесс с правами админа с ожиданием веб-сервера"""
     try:
         r = requests.get(url, timeout=0.8)
-        r.raise_for_status()
-        return True
+        if r.status_code == 200:
+            return True
     except Exception:
-        target_exe = exe_path or get_lhm_exe_path()
-        print("[INFO] LibreHardwareMonitor is not running. Auto-starting background process...")
-        if os.path.exists(target_exe):
-            try:
-                os.startfile(target_exe, "runas")
-                print(f"[OK] Launched {os.path.basename(target_exe)} with Admin rights. Waiting for web server...")
-                for _ in range(10):
-                    time.sleep(0.5)
-                    try:
-                        check_res = requests.get(url, timeout=0.8)
-                        if check_res.status_code == 200:
-                            print("[OK] Web server is ready!")
-                            return True
-                    except Exception:
-                        pass
-                return True
-            except Exception as e:
-                print(f"[WARNING] Could not auto-launch {target_exe}: {e}")
-                return False
-        else:
-            print(f"[WARNING] Executable not found at: {target_exe}")
-            print(f"Please specify the correct path in '{LHM_CONFIG_FILE}'")
+        pass
+
+    target_exe = exe_path or get_lhm_exe_path()
+    print("[INFO] LibreHardwareMonitor is not running. Auto-starting background process...")
+    if os.path.exists(target_exe):
+        try:
+            os.startfile(target_exe, "runas")
+            print(f"[OK] Launched {os.path.basename(target_exe)} (Admin). Waiting for web server at {url}...")
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    check_res = requests.get(url, timeout=0.8)
+                    if check_res.status_code == 200:
+                        print("[OK] Web server is ready!")
+                        return True
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            print(f"[WARNING] Could not auto-launch {target_exe}: {e}")
             return False
+    else:
+        print(f"[WARNING] Executable not found at: {target_exe}")
+        print(f"Please specify the correct path in '{LHM_PATH_FILE}' (run 'python utils/init_configs.py')")
+        return False
 
 
 def close_lhm_process():
