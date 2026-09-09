@@ -22,14 +22,18 @@ from ui.styles import (
     create_clean_region, create_clean_2d_rect_item,
     BTN_GREEN_QSS, BTN_RED_QSS, get_move_btn_qss
 )
-from core.defaults import AUDIO_PROFILE, VIEW_STATE_PATH
+from core.defaults import AUDIO_PROFILE
 from ui.sidebar import StudioSidebar
 from ui.telemetry_panel import TelemetryPanel
 from ui.audio_panel import AudioPanel
 
-RESULTS_DIR = "results"
-LOGS_DIR = os.path.join(RESULTS_DIR, "sensors_logs")
-HW_INFO_FILE = os.path.join("system_info", "hardware_info.json")
+PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
+
+SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
+RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+TELEMETRY_LOGS_DIR = os.path.join(RESULTS_DIR, "raw_telemetry")
+AUDIO_LOGS_DIR = os.path.join(RESULTS_DIR, "raw_audio")
+HW_INFO_FILE = os.path.join(SYS_INFO_DIR, "hardware_info.json")
 
 DEFAULT_SMOOTHING = 4
 DEFAULT_RAW_ALPHA = 1.0
@@ -140,6 +144,13 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
             col = TelemetryEngine.find_column_by_sensor_id(self.df, s["id"])
             if col is not None:
                 self.p2_sensors.append({**s, "col": col})
+
+        total_found = len(self.p1_sensors) + len(self.p2_sensors)
+        if total_found == 0:
+            print(f"\n[WARNING] Profile '{self.current_mode}' has NO matching sensors in '{self.selected_file}'!")
+            print(f" • Configured sensors in profile: {len(self.profile.get('panel1_sensors', [])) + len(self.profile.get('panel2_sensors', []))}")
+            print(f" • Did you save sensors in this profile? Run 'python utils/init_configs.py' and click 'Save Configuration'.")
+            print(f" • Or switch to another profile in the top-left dropdown if you created a custom one.\n")
 
     def attach_overlay_view(self, plot_widget, color_hex, default_side):
         vb = OverlayViewBox()
@@ -980,8 +991,9 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
 #                      MAIN ENTRY
 # =======================================================
 if __name__ == '__main__':
-    if not os.path.exists(LOGS_DIR):
-        print(f"Error: Directory '{LOGS_DIR}' not found!")
+    target_logs_dir = TELEMETRY_LOGS_DIR if os.path.exists(TELEMETRY_LOGS_DIR) else os.path.join(RESULTS_DIR, "sensors_logs")
+    if not os.path.exists(target_logs_dir):
+        print(f"Error: Directory '{target_logs_dir}' not found!")
         sys.exit(1)
 
     cpu_name = "CPU"
@@ -990,24 +1002,33 @@ if __name__ == '__main__':
         try:
             with open(HW_INFO_FILE, "r", encoding="utf-8") as f:
                 hw_info = json.load(f)
-                for comp in hw_info.get("components", []):
-                    c_name = comp.get("name", "")
-                    c_lower = c_name.lower()
-                    if any(x in c_lower for x in ["ryzen", "core i", "threadripper", "xeon", "intel core", "amd"]):
-                        if "radeon" not in c_lower:
+                cpu_name = hw_info.get("cpu_name", "CPU")
+                gpu_name = hw_info.get("gpu_name", "GPU")
+
+                # Дополнительная проверка по типам компонентов, если верхние поля отсутствуют
+                if cpu_name == "CPU" or gpu_name == "GPU":
+                    for comp in hw_info.get("components", []):
+                        c_type = comp.get("type")
+                        c_name = comp.get("name")
+                        if c_type == "CPU" and cpu_name == "CPU":
                             cpu_name = c_name
-                    if any(x in c_lower for x in ["rtx", "gtx", "geforce", "radeon", "intel arc", "nvidia"]):
-                        gpu_name = c_name
+                        elif c_type == "GPU" and gpu_name == "GPU":
+                            gpu_name = c_name
         except Exception:
             pass
 
-    files = [f for f in os.listdir(LOGS_DIR) if f.endswith(".csv") and (f.startswith("table_raw_") or not (f.startswith("table_") or f.startswith("graph_") or f.startswith("summary_")))]
+
+    if not os.path.exists(target_logs_dir):
+        print(f"Error: Directory '{target_logs_dir}' not found!")
+        sys.exit(1)
+
+    files = [f for f in os.listdir(target_logs_dir) if f.endswith(".csv") and (f.startswith("table_raw_") or not (f.startswith("table_") or f.startswith("graph_") or f.startswith("summary_")))]
     if not files:
-        print(f"No CSV test logs found in '{LOGS_DIR}' directory!")
+        print(f"No CSV test logs found in '{target_logs_dir}' directory!")
         sys.exit(1)
 
     print("="*60)
-    print("         PC COOLING ALALYZER         ")
+    print("         PC COOLING STUDIO SUITE         ")
     print("="*60)
     for idx, f in enumerate(files):
         print(f"  [{idx + 1}] {f}")
@@ -1017,14 +1038,16 @@ if __name__ == '__main__':
     file_idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(files) else 0
 
     selected_file = files[file_idx]
-    file_path = os.path.join(LOGS_DIR, selected_file)
+    file_path = os.path.join(target_logs_dir, selected_file)
 
-    # Автоматически ищем парный аудиофайл по имени лога
+    # Автоматически ищем парный аудиофайл в audio_logs (или legacy в target_logs_dir)
+    audio_dir_to_search = AUDIO_LOGS_DIR if os.path.exists(AUDIO_LOGS_DIR) else target_logs_dir
     audio_file_name = selected_file.replace("table_raw_", "audio_raw_").replace(".csv", ".mp3")
-    audio_path = os.path.join(LOGS_DIR, audio_file_name)
+    audio_path = os.path.join(audio_dir_to_search, audio_file_name)
+
     if not os.path.exists(audio_path):
         audio_file_name_wav = selected_file.replace("table_raw_", "audio_raw_").replace(".csv", ".wav")
-        audio_path = os.path.join(LOGS_DIR, audio_file_name_wav)
+        audio_path = os.path.join(audio_dir_to_search, audio_file_name_wav)
         if not os.path.exists(audio_path):
             audio_path = None
 

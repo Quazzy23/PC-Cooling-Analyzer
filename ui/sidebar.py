@@ -125,7 +125,13 @@ class StudioSidebar(QtWidgets.QFrame):
 
         passport_scroll = QtWidgets.QScrollArea()
         passport_scroll.setWidgetResizable(True)
-        passport_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        passport_scroll.setStyleSheet("""
+            QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {
+                background-color: #121212;
+                border: none;
+            }
+        """)
+        passport_scroll.viewport().setStyleSheet("background-color: #121212; border: none;")
         
         self.passport_widget = QtWidgets.QWidget()
         self.passport_layout = QtWidgets.QVBoxLayout(self.passport_widget)

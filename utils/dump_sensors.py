@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from utils.lhm_client import LHM_URL, ensure_lhm_running
 
-SYS_INFO_DIR = "system_info"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
 os.makedirs(SYS_INFO_DIR, exist_ok=True)
 OUTPUT_FILE = os.path.join(SYS_INFO_DIR, "lhm_sensors_dump.txt")
 

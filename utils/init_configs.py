@@ -18,7 +18,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from utils.lhm_client import LHM_URL, LHM_PATH_FILE, ensure_lhm_running
 
-SYS_INFO_DIR = "system_info"
+# Жестко привязываем корень проекта относительно расположения этого скрипта
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
 CONFIG_FILE = os.path.join(SYS_INFO_DIR, "sensors_config.json")
 DEFAULT_LHM_PATH = r"C:\Program Files\LibreHardwareMonitor\LibreHardwareMonitor.exe"
 
@@ -71,6 +73,12 @@ def ensure_valid_lhm_path_on_disk():
 
     if current_path and os.path.isfile(current_path):
         print(f"[OK] Verified LibreHardwareMonitor path: '{current_path}'")
+        lhm_dir = os.path.dirname(current_path)
+        dll_path = os.path.join(lhm_dir, "LibreHardwareMonitorLib.dll")
+        if os.path.exists(dll_path):
+            from utils.lhm_client import unblock_file
+            unblock_file(dll_path)
+            print(f"[OK] Unblocked 'LibreHardwareMonitorLib.dll' successfully.\n")
         return current_path
 
     print("=" * 70)
@@ -97,7 +105,18 @@ def ensure_valid_lhm_path_on_disk():
             with open(LHM_PATH_FILE, "w", encoding="utf-8") as f:
                 f.write(resolved + "\n")
             print(f"\n[SUCCESS] LibreHardwareMonitor found: '{resolved}'")
-            print(f"[SUCCESS] Saved to '{LHM_PATH_FILE}'\n")
+            print(f"[SUCCESS] Saved to '{LHM_PATH_FILE}'")
+
+            # Автоматическая разблокировка DLL библиотеки от защиты Windows
+            lhm_dir = os.path.dirname(resolved)
+            dll_path = os.path.join(lhm_dir, "LibreHardwareMonitorLib.dll")
+            if os.path.exists(dll_path):
+                from utils.lhm_client import unblock_file
+                unblock_file(dll_path)
+                print(f"[OK] Unblocked 'LibreHardwareMonitorLib.dll' successfully.\n")
+            else:
+                print()
+
             return resolved
         else:
             print(f"\n[ERROR] 'LibreHardwareMonitor.exe' was NOT found in '{target_candidate}'!")

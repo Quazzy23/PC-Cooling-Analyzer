@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.defaults import AUDIO_PROFILE
 
-SYS_INFO_DIR = "system_info"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
 os.makedirs(SYS_INFO_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(SYS_INFO_DIR, "audio_config.json")
 

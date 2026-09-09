@@ -27,18 +27,23 @@ POSTFIX = "test"     # Постфикс имени лога
 
 CLOSE_LHM_ON_EXIT = 1 # 1 = закрывать LHM при выходе, 0 = оставлять в трее
 
-RESULTS_DIR = "results"
-LOGS_DIR = os.path.join(RESULTS_DIR, "sensors_logs")
-SYS_INFO_DIR = "system_info"
+# Фиксируем пути строго к корню проекта независимо от того, где открыт терминал
+PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
-os.makedirs(LOGS_DIR, exist_ok=True)
+RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+TELEMETRY_LOGS_DIR = os.path.join(RESULTS_DIR, "raw_telemetry")
+AUDIO_LOGS_DIR = os.path.join(RESULTS_DIR, "raw_audio")
+SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
+
+os.makedirs(TELEMETRY_LOGS_DIR, exist_ok=True)
+os.makedirs(AUDIO_LOGS_DIR, exist_ok=True)
 os.makedirs(SYS_INFO_DIR, exist_ok=True)
 
-CSV_FILENAME = os.path.join(LOGS_DIR, f"table_raw_{POSTFIX}.csv")
+CSV_FILENAME = os.path.join(TELEMETRY_LOGS_DIR, f"table_raw_{POSTFIX}.csv")
 HW_INFO_FILENAME = os.path.join(SYS_INFO_DIR, "hardware_info.json")
 AUDIO_CFG_FILE = os.path.join(SYS_INFO_DIR, "audio_config.json")
 
-# Загрузка всех настроенных профилей (CPU, GPU и др.)
+# Динамическая загрузка всех доступных профилей (CPU, GPU и др.)
 all_modes = [m for m in get_available_profiles() if m != "ALL"]
 profile_sensors = {}
 
@@ -61,7 +66,7 @@ except ImportError:
     HAS_LAME = False
 
 AUDIO_EXT = ".mp3" if HAS_LAME else ".wav"
-AUDIO_FILENAME = os.path.join(LOGS_DIR, f"audio_raw_{POSTFIX}{AUDIO_EXT}")
+AUDIO_FILENAME = os.path.join(AUDIO_LOGS_DIR, f"audio_raw_{POSTFIX}{AUDIO_EXT}")
 
 
 class AudioRecorder:
@@ -193,13 +198,8 @@ except Exception as e:
 # 3. Инициализация аудиозаписи
 recorder = AudioRecorder(AUDIO_FILENAME, AUDIO_CFG_FILE)
 
-# 4. Сохранение паспорта оборудования
-pc_name, hardware_components = extract_hardware_structure(raw_json)
-system_metadata = {
-    "computer_name": pc_name,
-    "hardware_count": len(hardware_components),
-    "components": hardware_components
-}
+# 4. Сохранение паспорта оборудования со строгой типизацией
+pc_name, system_metadata = extract_hardware_structure(raw_json)
 with open(HW_INFO_FILENAME, "w", encoding="utf-8") as hw_file:
     json.dump(system_metadata, hw_file, indent=4, ensure_ascii=False)
 
@@ -211,8 +211,8 @@ print("Monitored Profiles:")
 for mode, s_list in profile_sensors.items():
     print(f" • [{mode}]: {len(s_list)} sensors")
 print(f"Host PC: {pc_name}")
-for hw in hardware_components:
-    print(f" • {hw['name']}")
+for hw in system_metadata.get("components", []):
+    print(f" • {hw['name']} [{hw.get('type', 'Other')}]")
 print()
 
 # 6. Заголовки CSV

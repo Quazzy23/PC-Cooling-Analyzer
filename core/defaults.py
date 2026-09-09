@@ -32,9 +32,12 @@ AUDIO_PROFILE = {
     "calibration_offset": 90.0
 }
 
-DEFAULT_CONFIG_PATH = os.path.join("system_info", "sensors_config.json")
-AUDIO_CONFIG_PATH = os.path.join("system_info", "audio_config.json")
-VIEW_STATE_PATH = os.path.join("system_info", "view_state.json")
+# Фиксируем корень проекта независимо от текущей рабочей директории терминала
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "system_info", "sensors_config.json")
+AUDIO_CONFIG_PATH = os.path.join(PROJECT_ROOT, "system_info", "audio_config.json")
+VIEW_STATE_PATH = os.path.join(PROJECT_ROOT, "system_info", "view_state.json")
 
 
 def determine_default_axis(label_name: str) -> str:
