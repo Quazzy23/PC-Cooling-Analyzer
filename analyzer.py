@@ -83,6 +83,8 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         # Реестры
         self.sensor_sides = {}
         self.sensor_move_active = {}
+        self.sensor_visibility = {}
+        self.sensor_colors = {}
         self.sensor_y_limits = {}
         self.panning_data = None
         self.curves = {}
@@ -133,17 +135,59 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         self.total_duration_telemetry = float(self.time_data[-1])
         self.total_duration = max(self.total_duration_telemetry, self.total_duration_audio)
 
-        self.p1_sensors = []
-        for s in self.profile.get("panel1_sensors", []):
+        # Собираем все доступные в профиле датчики
+        all_raw_sensors = {}
+        for s in self.profile.get("panel1_sensors", []) + self.profile.get("panel2_sensors", []):
             col = TelemetryEngine.find_column_by_sensor_id(self.df, s["id"])
             if col is not None:
-                self.p1_sensors.append({**s, "col": col})
+                all_raw_sensors[s["id"]] = {**s, "col": col}
 
+        # Проверяем, сохранен ли вид с кастомными слоями в view_state.json
+        saved_state = self.session_view_states.get(self.profile["mode_name"])
+        if saved_state is None:
+            saved_state = load_user_view_state(self.profile["mode_name"])
+
+        self.p1_sensors = []
         self.p2_sensors = []
-        for s in self.profile.get("panel2_sensors", []):
-            col = TelemetryEngine.find_column_by_sensor_id(self.df, s["id"])
-            if col is not None:
-                self.p2_sensors.append({**s, "col": col})
+
+        # Если есть сохраненный порядок Panel 1 / Panel 2 в пресете
+        if isinstance(saved_state, dict) and ("panel1" in saved_state or "panel2" in saved_state):
+            assigned_ids = set()
+
+            for item in saved_state.get("panel1", []):
+                sid = item.get("id")
+                if sid in all_raw_sensors:
+                    s_data = dict(all_raw_sensors[sid])
+                    if item.get("color"):
+                        s_data["color"] = item["color"]
+                    self.p1_sensors.append(s_data)
+                    assigned_ids.add(sid)
+
+            for item in saved_state.get("panel2", []):
+                sid = item.get("id")
+                if sid in all_raw_sensors:
+                    s_data = dict(all_raw_sensors[sid])
+                    if item.get("color"):
+                        s_data["color"] = item["color"]
+                    self.p2_sensors.append(s_data)
+                    assigned_ids.add(sid)
+
+            # Добавляем новые датчики, если они появились после создания пресета
+            for sid, s_data in all_raw_sensors.items():
+                if sid not in assigned_ids:
+                    self.p1_sensors.append(s_data)
+        else:
+            # Дефолтная авто-раскладка
+            for s in self.profile.get("panel1_sensors", []):
+                if s["id"] in all_raw_sensors:
+                    self.p1_sensors.append(dict(all_raw_sensors[s["id"]]))
+            for s in self.profile.get("panel2_sensors", []):
+                if s["id"] in all_raw_sensors:
+                    self.p2_sensors.append(dict(all_raw_sensors[s["id"]]))
+
+        # Закрепляем цвета датчиков
+        for s in self.p1_sensors + self.p2_sensors:
+            self.sensor_colors[s["key"]] = s["color"]
 
         total_found = len(self.p1_sensors) + len(self.p2_sensors)
         if total_found == 0:
@@ -288,9 +332,9 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
 
         top_layout.addStretch()
 
-        # Паспорт лога и устройства (Hardware единым серым цветом через |)
+        # Паспорт датасета и устройства (Dataset вместо Log)
         lbl_info = QtWidgets.QLabel(
-            f"<span style='color:#888888;'>Log:</span> <b style='color:#00E5FF;'>{self.clean_file_name}</b> "
+            f"<span style='color:#888888;'>Dataset:</span> <b style='color:#00E5FF;'>{self.clean_file_name}</b> "
             f"<span style='color:#444444;'>|</span> "
             f"<span style='color:#888888;'>Hardware: {self.cpu_name} | {self.gpu_name}</span>"
         )
@@ -428,6 +472,7 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(50, lambda: self.outer_splitter.setSizes([340, 1500]))
         QtCore.QTimer.singleShot(50, lambda: self.plots_splitter.setSizes([750, 750]))
         QtCore.QTimer.singleShot(70, self._fit_timelines_to_full_duration)
+        QtCore.QTimer.singleShot(80, self.sidebar.auto_fit_sidebar_splitters)
 
     def _rebalance_splitter(self):
         t_vis = self.btn_toggle_telemetry.isChecked()
@@ -477,12 +522,7 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         self.profile = load_sensor_profile(self.current_mode)
         self.update_report_paths()
 
-        cur_hw = self.get_current_hardware_name()
-        self.setWindowTitle(f"PC Cooling Studio Suite [{self.profile['mode_name']}] — {self.clean_file_name} ({cur_hw})")
-        p1_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>1. {self.profile['chart_title_prefix']} ({cur_hw} — {self.clean_file_name})</b></span>"
-        self.telemetry_panel.p1_plot.setTitle(p1_title, justify='left')
-        p2_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>2. {self.profile['panel2_title']}</b></span>"
-        self.telemetry_panel.p2_plot.setTitle(p2_title, justify='left')
+        self.setWindowTitle(f"PC Cooling Studio Suite [{self.profile['mode_name']}] — {self.clean_file_name}")
 
         for k, vb in list(self.viewboxes_map.items()):
             if vb.scene() is not None:
@@ -514,6 +554,7 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         self.sidebar.populate_passport_rows()
 
         self.apply_saved_or_default_view()
+        self.update_curve_z_values()
         self.populate_summary_table()
         self.update_plots_data()
         self.sync_all_overlay_views()
@@ -555,7 +596,107 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         self.sensor_move_active[key] = new_state
         btn.setStyleSheet(get_move_btn_qss(new_state))
 
+    def update_curve_z_values(self):
+        """Чем выше датчик в списке паспорта, тем выше его Z-слой на графике"""
+        n1 = len(self.p1_sensors)
+        for idx, s in enumerate(self.p1_sensors):
+            k = s["key"]
+            z = 100 + (n1 - idx) * 3
+            if f"{k}_raw" in self.curves:
+                self.curves[f"{k}_raw"].setZValue(z)
+                self.curves[f"{k}_trend"].setZValue(z + 1)
+            if k in self.intersection_tags:
+                self.intersection_tags[k].setZValue(z + 2)
+
+        n2 = len(self.p2_sensors)
+        for idx, s in enumerate(self.p2_sensors):
+            k = s["key"]
+            z = 100 + (n2 - idx) * 3
+            if f"{k}_raw" in self.curves:
+                self.curves[f"{k}_raw"].setZValue(z)
+                self.curves[f"{k}_trend"].setZValue(z + 1)
+            if k in self.intersection_tags:
+                self.intersection_tags[k].setZValue(z + 2)
+
+    def handle_sensor_drag_drop(self, sensor_key: str, source_panel: str, target_panel: str, target_row: int):
+        """Обрабатывает перемещение датчиков внутри панели и между Panel 1 и Panel 2"""
+        source_list = self.p1_sensors if source_panel == "panel1" else self.p2_sensors
+        target_list = self.p1_sensors if target_panel == "panel1" else self.p2_sensors
+
+        # Находим перемещаемый датчик
+        found_idx = None
+        for i, s in enumerate(source_list):
+            if s["key"] == sensor_key:
+                found_idx = i
+                break
+
+        if found_idx is None:
+            return
+
+        sensor_data = source_list.pop(found_idx)
+
+        # Если перетащили между панелями (P1 <-> P2)
+        if source_panel != target_panel:
+            target_plot = self.telemetry_panel.p1_plot if target_panel == "panel1" else self.telemetry_panel.p2_plot
+            self.transfer_sensor_to_plot(sensor_data, target_plot)
+
+        # Вставляем на новую позицию
+        insert_idx = min(max(0, target_row), len(target_list))
+        target_list.insert(insert_idx, sensor_data)
+
+        # Обновляем слои Z-Index на графиках и перерисовываем списки в паспорте
+        self.update_curve_z_values()
+        self.sidebar.populate_passport_rows()
+        self.sync_all_overlay_views()
+        self.update_y_limits()
+        self.populate_summary_table()
+        self.seek_to_time(self.current_time_cursor)
+
+    def transfer_sensor_to_plot(self, s: dict, target_plot: pg.PlotWidget):
+        """Переносит кривые, оверлеи и шкалы датчика с одного графика на другой"""
+        k = s["key"]
+
+        # Удаляем со старого графика
+        if k in self.viewboxes_map:
+            vb_old = self.viewboxes_map[k]
+            if vb_old.scene():
+                vb_old.scene().removeItem(vb_old)
+        if k in self.axes_map:
+            for ax in self.axes_map[k].values():
+                if ax.scene():
+                    ax.scene().removeItem(ax)
+        if k in self.intersection_tags:
+            tag = self.intersection_tags[k]
+            if tag.scene():
+                tag.scene().removeItem(tag)
+
+        # Создаем оверлей на новом целевом графике
+        cur_side = self.sensor_sides.get(k, "left")
+        vb_new, ax_l, ax_r = self.attach_overlay_view(target_plot, s['color'], cur_side)
+        self.plot_map[k] = target_plot
+        self.viewboxes_map[k] = vb_new
+        self.axes_map[k] = {'left': ax_l, 'right': ax_r}
+
+        # Переносим существующие кривые
+        c_raw = self.curves.get(f"{k}_raw")
+        c_trend = self.curves.get(f"{k}_trend")
+        tag = self.intersection_tags.get(k)
+
+        if c_raw:
+            vb_new.addItem(c_raw)
+        if c_trend:
+            vb_new.addItem(c_trend)
+        if tag:
+            vb_new.addItem(tag)
+
+        # Восстанавливаем видимость осей
+        is_visible = self.sensor_visibility.get(k, False)
+        target_axis = self.axes_map[k][cur_side]
+        target_axis.setVisible(is_visible)
+
     def toggle_curve_visibility(self, key, is_visible):
+        self.sensor_visibility[key] = is_visible
+
         if f"{key}_raw" in self.curves:
             self.curves[f"{key}_raw"].setVisible(is_visible)
             self.curves[f"{key}_trend"].setVisible(is_visible)
@@ -568,7 +709,7 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
             axes = self.axes_map[key]
             plot_widget = self.plot_map[key]
             vb = self.viewboxes_map[key]
-            
+
             target_axis = axes[cur_side]
             hidden_axis = axes['right' if cur_side == 'left' else 'left']
             hidden_axis.setVisible(False)
@@ -587,47 +728,79 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
                 target_axis.setVisible(False)
 
             plot_widget.plotItem.scene().update()
-        
+
         self.seek_to_time(self.current_time_cursor)
 
     def save_view_preset_action(self):
-        current_state = {}
-        all_sensors = self.p1_sensors + self.p2_sensors
-        for s in all_sensors:
+        """Сохраняет слои Z-Index, разбиение по панелям, цвет и параметры в view_state.json"""
+        p1_state = []
+        for s in self.p1_sensors:
             k = s["key"]
-            sid = s["id"]
-            current_state[sid] = {
-                "visible": self.sensor_checkboxes[k].isChecked() if k in self.sensor_checkboxes else False,
+            p1_state.append({
+                "id": s["id"],
+                "color": self.sensor_colors.get(k, s["color"]),
+                "visible": self.sensor_visibility.get(k, False),
                 "axis": self.sensor_sides.get(k, "left"),
                 "move": self.sensor_move_active.get(k, False)
-            }
+            })
+
+        p2_state = []
+        for s in self.p2_sensors:
+            k = s["key"]
+            p2_state.append({
+                "id": s["id"],
+                "color": self.sensor_colors.get(k, s["color"]),
+                "visible": self.sensor_visibility.get(k, False),
+                "axis": self.sensor_sides.get(k, "left"),
+                "move": self.sensor_move_active.get(k, False)
+            })
+
+        current_state = {
+            "panel1": p1_state,
+            "panel2": p2_state
+        }
+
         self.session_view_states[self.profile["mode_name"]] = current_state
         save_all_session_view_states(self.profile["mode_name"], self.session_view_states)
 
         self.sidebar.btn_save_view.setText("Preset Saved!")
         QtCore.QTimer.singleShot(2000, lambda: self.sidebar.btn_save_view.setText("Save View Preset"))
-        print(f"[OK] View presets saved successfully.")
+        print(f"[OK] View preset for [{self.profile['mode_name']}] saved (layers, colors, panels).")
 
     def apply_saved_or_default_view(self):
         saved_state = self.session_view_states.get(self.profile["mode_name"])
         if saved_state is None:
             saved_state = load_user_view_state(self.profile["mode_name"])
 
-        all_sensors = self.p1_sensors + self.p2_sensors
+        # Плоский словарь параметров датчиков из пресета
+        lookup = {}
+        if isinstance(saved_state, dict):
+            if "panel1" in saved_state or "panel2" in saved_state:
+                for item in saved_state.get("panel1", []) + saved_state.get("panel2", []):
+                    lookup[item["id"]] = item
+            else:
+                lookup = saved_state
 
+        all_sensors = self.p1_sensors + self.p2_sensors
         for s in all_sensors:
             k = s["key"]
             sid = s["id"]
-            if sid in saved_state:
-                s_cfg = saved_state[sid]
-                is_vis = s_cfg.get("visible", False)
-                axis_side = s_cfg.get("axis", "left")
-                is_move = s_cfg.get("move", False)
+            if sid in lookup:
+                cfg = lookup[sid]
+                is_vis = cfg.get("visible", False)
+                axis_side = cfg.get("axis", "left")
+                is_move = cfg.get("move", False)
+                if cfg.get("color"):
+                    s["color"] = cfg["color"]
+                    self.sensor_colors[k] = cfg["color"]
             else:
-                # По умолчанию все датчики строго выключены, пока пользователь сам не поставит галочку
                 is_vis = False
                 axis_side = "left"
                 is_move = False
+
+            self.sensor_visibility[k] = is_vis
+            self.sensor_sides[k] = axis_side
+            self.sensor_move_active[k] = is_move
 
             if k in self.sensor_checkboxes:
                 self.sensor_checkboxes[k].blockSignals(True)
@@ -638,6 +811,9 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
             if k in self.move_buttons:
                 self.toggle_sensor_move(k, self.move_buttons[k], force_state=is_move)
             self.toggle_curve_visibility(k, is_vis)
+
+        # Выставляем стартовые Z-слои
+        self.update_curve_z_values()
 
     def seek_to_time(self, target_sec: float):
         self.current_time_cursor = max(0.0, min(self.total_duration, target_sec))
@@ -864,9 +1040,10 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
             smoothing_window=smooth_val
         )
         if self.time_regions:
-            self.sidebar.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#00E5FF; font-size:7.5pt;'>({ranges_title})</span>")
+            # Диапазон времени теперь серый (#AAAAAA)
+            self.sidebar.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#AAAAAA; font-size:7.5pt;'>({ranges_title})</span>")
         else:
-            self.sidebar.lbl_summary_title.setText(f"<b>SUMMARY METRICS</b> <span style='color:#888; font-size:8pt;'>({self.profile['mode_name']} Total)</span>")
+            self.sidebar.lbl_summary_title.setText("<b>SUMMARY METRICS</b>")
 
         self.sidebar.table_summary.setRowCount(len(rows))
         for r_idx, (m, mn, mx, av) in enumerate(rows):
@@ -874,9 +1051,18 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
             item_mn = QtWidgets.QTableWidgetItem(mn)
             item_mx = QtWidgets.QTableWidgetItem(mx)
             item_av = QtWidgets.QTableWidgetItem(av)
+            
+            # Возвращаем цифрам в таблице обычный белый цвет
+            item_m.setForeground(QtGui.QColor("#FFFFFF"))
+            item_mn.setForeground(QtGui.QColor("#FFFFFF"))
+            item_mx.setForeground(QtGui.QColor("#FFFFFF"))
+            item_av.setForeground(QtGui.QColor("#FFFFFF"))
+
+            item_m.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             item_mn.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             item_mx.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             item_av.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            
             self.sidebar.table_summary.setItem(r_idx, 0, item_m)
             self.sidebar.table_summary.setItem(r_idx, 1, item_mn)
             self.sidebar.table_summary.setItem(r_idx, 2, item_mx)
@@ -981,7 +1167,13 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
             self.toggle_play()
             event.accept()
         elif event.key() == QtCore.Qt.Key.Key_Escape:
+            # Сбрасываем выделенные регионы в Телеметрии
             self.clear_all_time_regions()
+            
+            # Сбрасываем частотные/временные фильтры в Аудио DAW
+            if hasattr(self, 'clear_all_filters'):
+                self.clear_all_filters()
+                
             event.accept()
         else:
             super().keyPressEvent(event)

@@ -27,6 +27,10 @@ POSTFIX = "test"     # Постфикс имени лога
 
 CLOSE_LHM_ON_EXIT = 1 # 1 = закрывать LHM при выходе, 0 = оставлять в трее
 
+# --- Ограничение размера файла (Кольцевой FIFO-буфер) ---
+ENABLE_BUFFER_LIMIT = True
+BUFFER_MAX_SAMPLES = 5000
+
 # Фиксируем пути строго к корню проекта независимо от того, где открыт терминал
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
@@ -198,10 +202,17 @@ except Exception as e:
 # 3. Инициализация аудиозаписи
 recorder = AudioRecorder(AUDIO_FILENAME, AUDIO_CFG_FILE)
 
-# 4. Сохранение паспорта оборудования со строгой типизацией
-pc_name, system_metadata = extract_hardware_structure(raw_json)
-with open(HW_INFO_FILENAME, "w", encoding="utf-8") as hw_file:
-    json.dump(system_metadata, hw_file, indent=4, ensure_ascii=False)
+# 4. Чтение паспорта оборудования (созданного в init_configs.py)
+pc_name = "Host PC"
+components = []
+if os.path.exists(HW_INFO_FILENAME):
+    try:
+        with open(HW_INFO_FILENAME, "r", encoding="utf-8") as hw_f:
+            hw_data = json.load(hw_f)
+            pc_name = hw_data.get("computer_name", "Host PC")
+            components = hw_data.get("components", [])
+    except Exception:
+        pass
 
 # 5. Первичное сканирование всех доступных датчиков
 sensor_map = {}
@@ -211,7 +222,7 @@ print("Monitored Profiles:")
 for mode, s_list in profile_sensors.items():
     print(f" • [{mode}]: {len(s_list)} sensors")
 print(f"Host PC: {pc_name}")
-for hw in system_metadata.get("components", []):
+for hw in components:
     print(f" • {hw['name']} [{hw.get('type', 'Other')}]")
 print()
 
@@ -234,107 +245,146 @@ if recorder.is_active:
     print(f"Recording raw audio stream to: {AUDIO_FILENAME}")
 print("Press Ctrl+C to stop logging.\n")
 
+from collections import deque
+
 start_time = time.time()
 first_run = True
 prev_line_count = 0
+tick_count = 0
+
+# Кольцевой буфер строк данных
+row_buffer = deque(maxlen=BUFFER_MAX_SAMPLES if ENABLE_BUFFER_LIMIT else None)
+
+def flush_buffer_to_disk():
+    """Сбрасывает текущий кольцевой буфер на диск со стандартными 2-строчными заголовками"""
+    with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(row_names)
+        w.writerow(row_ids)
+        w.writerows(row_buffer)
 
 # 7. Главный цикл логирования
-with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as file:
-    writer = csv.writer(file)
+# Если буфер отключен, держим открытый файловый дескриптор для бесконечной записи
+file_stream = None if ENABLE_BUFFER_LIMIT else open(CSV_FILENAME, mode='w', newline='', encoding='utf-8')
+writer = None if ENABLE_BUFFER_LIMIT else csv.writer(file_stream)
+if writer:
     writer.writerow(row_names)
     writer.writerow(row_ids)
-    file.flush()
+    file_stream.flush()
 
-    try:
-        while True:
-            t0 = time.time()
-            elapsed = t0 - start_time
+try:
+    while True:
+        t0 = time.time()
+        elapsed = t0 - start_time
+        tick_count += 1
 
-            try:
-                response = session.get(LHM_URL, timeout=1.0)
-                curr_json = response.json()
-            except Exception:
-                time.sleep(INTERVAL)
-                continue
+        try:
+            response = session.get(LHM_URL, timeout=1.0)
+            curr_json = response.json()
+        except Exception:
+            time.sleep(INTERVAL)
+            continue
 
-            curr_sensor_map = {}
-            flatten_json_tree(curr_json, curr_sensor_map)
+        curr_sensor_map = {}
+        flatten_json_tree(curr_json, curr_sensor_map)
 
-            # Запись полной строки всех датчиков в CSV
-            row_data = [round(elapsed, 2)]
-            for sid in active_sensor_ids:
-                val = curr_sensor_map.get(sid, {}).get("value")
-                row_data.append(val)
+        # Сборка текущей строки отсчета
+        row_data = [round(elapsed, 2)]
+        for sid in active_sensor_ids:
+            val = curr_sensor_map.get(sid, {}).get("value")
+            row_data.append(val)
 
-            if recorder.is_active:
-                row_data.append(recorder.current_sound_dba)
+        if recorder.is_active:
+            row_data.append(recorder.current_sound_dba)
 
+        # Обработка записи: кольцевой буфер либо потоковый файл
+        if ENABLE_BUFFER_LIMIT:
+            row_buffer.append(row_data)
+            # Перезаписываем файл на диске 1 раз в секунду (каждые 4 тика) для защиты SSD от износа
+            if tick_count % 4 == 0:
+                flush_buffer_to_disk()
+        else:
             writer.writerow(row_data)
 
-            # Формирование строк вывода
-            out_lines = []
+        # Формирование строк вывода
+        out_lines = []
 
-            for mode, sensors in profile_sensors.items():
-                out_lines.append(f"{f'[{mode}]':<36} {'VALUE':>12}")
-                out_lines.append("-" * 50)
-
-                for s in sensors:
-                    label = s["label"]
-                    clean_label = label[:36]
-                    val = curr_sensor_map.get(s["id"], {}).get("value")
-
-                    if val is None:
-                        val_str = "N/A"
-                    else:
-                        l_lower = label.lower()
-                        if "volt" in l_lower or "(v)" in l_lower:
-                            val_str = f"{val:.3f}"
-                        elif "rpm" in l_lower or "clock" in l_lower or "mhz" in l_lower:
-                            val_str = f"{val:.0f}"
-                        else:
-                            val_str = f"{val:.1f}"
-
-                    out_lines.append(f"{clean_label:<36} {val_str:>12}")
-
-                out_lines.append("")
-
-            # Блок уровня звука
-            if recorder.is_active:
-                if recorder.current_sound_dba is not None:
-                    snd_str = f"{recorder.current_sound_dba:>12.1f}"
-                else:
-                    snd_str = f"{'--.-':>12}"
-                out_lines.append(f"{'Sound Level (dBA)':<36} {snd_str}")
-                out_lines.append("-" * 50)
-
-            out_lines.append(f"{'Elapsed Time (s)':<36} {elapsed:>12.1f}")
+        for mode, sensors in profile_sensors.items():
+            out_lines.append(f"{f'[{mode}]':<36} {'VALUE':>12}")
             out_lines.append("-" * 50)
-            out_lines.append("Press Ctrl+C to stop logging.")
 
-            # Каждая строка снабжается маркером очистки остатка \033[K
-            formatted_block = "\n".join(f"{line}\033[K" for line in out_lines)
-            current_line_count = len(out_lines)
+            for s in sensors:
+                label = s["label"]
+                clean_label = label[:36]
+                val = curr_sensor_map.get(s["id"], {}).get("value")
 
-            # Перемещение курсора на начало блока и перезапись
-            if not first_run:
-                sys.stdout.write(f"\r\033[{prev_line_count - 1}A")
-            else:
-                first_run = False
+                if val is None:
+                    val_str = "N/A"
+                else:
+                    l_lower = label.lower()
+                    if "volt" in l_lower or "(v)" in l_lower:
+                        val_str = f"{val:.3f}"
+                    elif "rpm" in l_lower or "clock" in l_lower or "mhz" in l_lower:
+                        val_str = f"{val:.0f}"
+                    else:
+                        val_str = f"{val:.1f}"
 
-            sys.stdout.write(formatted_block)
-            sys.stdout.flush()
-            prev_line_count = current_line_count
+                out_lines.append(f"{clean_label:<36} {val_str:>12}")
 
-            exec_time = time.time() - t0
-            time.sleep(max(0.0, INTERVAL - exec_time))
+            out_lines.append("")
 
-    except KeyboardInterrupt:
-        sys.stdout.write("\n\n")
-        print("[STOP] Logging stopped by user.")
-        print(f"[SUCCESS] Telemetry CSV saved to: {CSV_FILENAME}")
+        # Блок уровня звука
         if recorder.is_active:
-            print(f"[SUCCESS] Audio recording saved to: {AUDIO_FILENAME}")
-    finally:
-        recorder.close()
-        if CLOSE_LHM_ON_EXIT == 1:
-            close_lhm_process()
+            if recorder.current_sound_dba is not None:
+                snd_str = f"{recorder.current_sound_dba:>12.1f}"
+            else:
+                snd_str = f"{'--.-':>12}"
+            out_lines.append(f"{'Sound Level (dBA)':<36} {snd_str}")
+            out_lines.append("-" * 50)
+
+        out_lines.append(f"{'Elapsed Time (s)':<36} {elapsed:>12.1f}")
+
+        # Индикатор кольцевого буфера
+        if ENABLE_BUFFER_LIMIT:
+            buffer_pct = (len(row_buffer) / BUFFER_MAX_SAMPLES) * 100
+            span_sec = len(row_buffer) * INTERVAL
+            out_lines.append(f"{'Buffer Window':<36} {f'{buffer_pct:.0f}%':>12}")
+
+        out_lines.append("-" * 50)
+        out_lines.append("Press Ctrl+C to stop logging.")
+
+        # Каждая строка снабжается маркером очистки остатка \033[K
+        formatted_block = "\n".join(f"{line}\033[K" for line in out_lines)
+        current_line_count = len(out_lines)
+
+        # Перемещение курсора на начало блока и перезапись
+        if not first_run:
+            sys.stdout.write(f"\r\033[{prev_line_count - 1}A")
+        else:
+            first_run = False
+
+        sys.stdout.write(formatted_block)
+        sys.stdout.flush()
+        prev_line_count = current_line_count
+
+        exec_time = time.time() - t0
+        time.sleep(max(0.0, INTERVAL - exec_time))
+
+except KeyboardInterrupt:
+    sys.stdout.write("\n\n")
+    print("[STOP] Logging stopped by user.")
+    # При выходе гарантированно сбрасываем последние отсчеты на диск
+    if ENABLE_BUFFER_LIMIT:
+        flush_buffer_to_disk()
+    elif file_stream:
+        file_stream.close()
+
+    print(f"[SUCCESS] Telemetry CSV saved to: {CSV_FILENAME}")
+    if recorder.is_active:
+        print(f"[SUCCESS] Audio recording saved to: {AUDIO_FILENAME}")
+finally:
+    recorder.close()
+    if file_stream and not file_stream.closed:
+        file_stream.close()
+    if CLOSE_LHM_ON_EXIT == 1:
+        close_lhm_process()

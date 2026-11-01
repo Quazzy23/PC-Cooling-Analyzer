@@ -7,9 +7,48 @@ import pyqtgraph as pg
 
 from core.defaults import AUDIO_PROFILE
 from core.audio_engine import LIMIT_FREQ_MIN
-from ui.custom_axes import CleanLogFrequencyAxis
 from ui.viewboxes import FFTFilterViewBox, SpectrogramTimelineViewBox
 from ui.styles import create_timeline_cursor, SPINBOX_CLEAN_QSS, BTN_CYAN_QSS, BTN_GREEN_QSS
+
+
+class CleanLogFrequencyAxis(pg.AxisItem):
+    """Шкала частот с умным переключением между обзорным (k) и детальным (полные цифры) зумом"""
+    def __init__(self, analyzer_ref=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.analyzer = analyzer_ref
+        self.enableAutoSIPrefix(False)
+
+    def tickStrings(self, values, scale, spacing):
+        strings = []
+        is_lin = hasattr(self, 'analyzer') and self.analyzer and getattr(self.analyzer, 'freq_scale_mode', 'Log') == "Linear"
+        
+        view_range = self.range
+        span = view_range[1] - view_range[0] if view_range and len(view_range) == 2 else 1000.0
+
+        # Порог зума, при котором 'k' отключается (0.8 для log10, 3000 Hz для линейного)
+        is_deep_zoom = span < 3000.0 if is_lin else span < 0.8
+
+        for val in values:
+            hz = float(val) if is_lin else (10.0 ** val)
+
+            if is_deep_zoom:
+                # При глубоком зуме показываем полные числа без букв
+                if hz >= 1000:
+                    strings.append(f"{hz:.0f}")
+                else:
+                    strings.append(f"{hz:.1f}" if hz < 100 else f"{hz:.0f}")
+            else:
+                # В обзорном режиме сокращаем до 'k'
+                if hz >= 1000:
+                    k_val = hz / 1000.0
+                    if abs(k_val - round(k_val)) < 0.05:
+                        strings.append(f"{round(k_val)}k")
+                    else:
+                        strings.append(f"{k_val:.1f}k")
+                else:
+                    strings.append(f"{round(hz)}")
+                    
+        return strings
 
 
 class AudioPanel(QtWidgets.QWidget):
@@ -56,7 +95,7 @@ class AudioPanel(QtWidgets.QWidget):
         ax_fft_l.setTextPen(pg.mkPen('#AAAAAA'))
         self.plot_fft.setLabel('left', 'Sound Pressure Level', units='dB', **{'color': '#AAAAAA', 'font-size': '8.5pt'})
         
-        self.plot_fft.setTitle("<span style='color: #FFFFFF; font-size: 10pt;'><b>3. Real-time Acoustic Spectrum (Live FFT)</b></span>", justify='left')
+        self.plot_fft.setTitle("<span style='color: #FFFFFF; font-size: 10pt;'><b>3. Real-time Acoustic Spectrum</b></span>", justify='left')
 
         self.fft_curve = self.plot_fft.plot(pen=pg.mkPen(color='#00E5FF', width=2))
         self.peak_scatter = self.plot_fft.plot(pen=None, symbol='x', symbolSize=12, symbolPen=pg.mkPen('#FF3366', width=2.5))
@@ -103,7 +142,7 @@ class AudioPanel(QtWidgets.QWidget):
         self.v_splitter.setSizes([5000, 5000])
         layout.addWidget(self.v_splitter, stretch=1)
 
-        # 3. Нижняя панель управления аудио (Play, Boost, Render, Scale, Y Min, Y Max)
+        # 3. Нижняя панель управления аудио
         controls_layout = QtWidgets.QHBoxLayout()
         controls_layout.setContentsMargins(2, 2, 2, 2)
         controls_layout.setSpacing(6)
@@ -164,11 +203,12 @@ class AudioPanel(QtWidgets.QWidget):
         self.spin_ymax.valueChanged.connect(self.on_fft_yrange_changed)
         controls_layout.addWidget(self.spin_ymax)
 
-        # Текстовый статус координат справа от полей Y Min / Y Max
+        controls_layout.addStretch()
+
         self.lbl_audio_status = QtWidgets.QLabel("")
         self.lbl_audio_status.setFixedHeight(30)
         self.lbl_audio_status.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.lbl_audio_status.setStyleSheet("color: #888888; font-size: 8pt; font-family: 'Segoe UI', Arial, sans-serif;")
+        self.lbl_audio_status.setStyleSheet("color: #888888; font-size: 8.5pt; font-family: 'Segoe UI', Arial, sans-serif;")
         controls_layout.addWidget(self.lbl_audio_status, stretch=1)
 
         layout.addLayout(controls_layout)

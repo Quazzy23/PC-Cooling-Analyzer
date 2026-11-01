@@ -27,7 +27,6 @@ A high-performance, modular hardware telemetry and acoustic spectral analysis su
 ### 1. Clone the repository
 ```bash
 git clone https://github.com/Quazzy23/PC-Cooling-Analyzer.git
-cd PC-Cooling-Analyzer
 ```
 
 ### 2. Download LibreHardwareMonitor
@@ -50,19 +49,10 @@ Run `logger.py` to record telemetry to CSV and synchronized audio to MP3.
 
 ### 7. Run Analysis
 Run `analyzer.py` and select the target CSV log to inspect interactive charts, summary metrics, and export reports.
+A detailed user guide for `analyzer.py` is available in the `readme.txt` file.
 
 ### 8. Fan Speed Sweep (Alpha feature)
 Run `utils/fan_control/find_fans.py` to discover available fan control headers. Configure sweep options in `utils/fan_control/sweep_test.py` under the `TEST CONFIGURATION` block. Run `utils/fan_control/sweep_test.py` to sweep fan speed. Live RPM can be verified in real time using tools like OCCT or LibreHardwareMonitor.
-
----
-
-## 📁 Repository Structure
-
-Currently, this repository hosts the codebase required to run the benchmarking pipeline:
-* `/core` — Data processing engines (telemetry smoothing, metrics, audio DSP, FFT).
-* `/ui` — Stylesheets, custom axes, and the unified interactive ViewBox engine.
-* `/utils` — LHM client, sensor config wizard, mic setup, and fan control scripts (`/fan_control`).
-* `analyzer.py` & `logger.py` — The primary executable interfaces.
 
 ---
 

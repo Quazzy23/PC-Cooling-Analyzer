@@ -36,15 +36,14 @@ class TelemetryPanel(QtWidgets.QWidget):
             }
         """)
 
-        # 1. Верхний график: Теплофизика (P1)
-        cur_hw = self.analyzer.get_current_hardware_name()
-        p1_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>1. {self.analyzer.profile['chart_title_prefix']} ({cur_hw} — {self.analyzer.clean_file_name})</b></span>"
+        # 1. Верхний график: Теплофизика и питание (P1)
+        p1_title = "<span style='color: #FFFFFF; font-size: 10pt;'><b>1. Thermal & Electrical Parameters</b></span>"
         self.p1_plot, self.vb1, self.cursor_line_p1 = self.create_telemetry_plot(p1_title)
         self.analyzer.setup_sensors_for_plot(self.analyzer.p1_sensors, self.p1_plot)
         self.v_splitter.addWidget(self.p1_plot)
 
         # 2. Нижний график: Обороты и Шум (P2)
-        p2_title = f"<span style='color: #FFFFFF; font-size: 10pt;'><b>2. {self.analyzer.profile['panel2_title']}</b></span>"
+        p2_title = "<span style='color: #FFFFFF; font-size: 10pt;'><b>2. Cooling Speeds & Sound Level</b></span>"
         self.p2_plot, self.vb2, self.cursor_line_p2 = self.create_telemetry_plot(p2_title, show_bottom_label=True)
         self.vb2.setXLink(self.vb1)
         self.analyzer.setup_sensors_for_plot(self.analyzer.p2_sensors, self.p2_plot)

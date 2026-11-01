@@ -1,8 +1,8 @@
 """
 Initial Setup & Sensors Configuration Wizard
-1. Prompts for and validates LibreHardwareMonitor path (folder or .exe).
+1. Prompts for and validates LibreHardwareMonitor path.
 2. Auto-launches LibreHardwareMonitor with Administrator privileges.
-3. Launches the Graphical Sensors Configuration Wizard (PyQt6).
+3. Launches the clean, streamlined Sensors Configuration Wizard (PyQt6).
 """
 import os
 import sys
@@ -13,29 +13,24 @@ import time
 import requests
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-# Добавляем корень проекта в путь импорта
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from utils.lhm_client import LHM_URL, LHM_PATH_FILE, ensure_lhm_running
+from utils.lhm_client import LHM_URL, LHM_PATH_FILE, ensure_lhm_running, extract_hardware_structure
 
-# Жестко привязываем корень проекта относительно расположения этого скрипта
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
 CONFIG_FILE = os.path.join(SYS_INFO_DIR, "sensors_config.json")
+HW_INFO_FILE = os.path.join(SYS_INFO_DIR, "hardware_info.json")
 DEFAULT_LHM_PATH = r"C:\Program Files\LibreHardwareMonitor\LibreHardwareMonitor.exe"
 
 os.makedirs(SYS_INFO_DIR, exist_ok=True)
 
 
 def resolve_lhm_path(raw_input: str) -> str:
-    """Resolves folder path or direct executable path to valid LibreHardwareMonitor.exe"""
     clean = raw_input.strip().strip('"').strip("'")
     if not clean:
         return ""
-
     norm = os.path.normpath(clean)
-
-    # Если ввели путь к папке
     if os.path.isdir(norm):
         target = os.path.join(norm, "LibreHardwareMonitor.exe")
         if os.path.isfile(target):
@@ -44,22 +39,16 @@ def resolve_lhm_path(raw_input: str) -> str:
             if f.lower() == "librehardwaremonitor.exe":
                 return os.path.join(norm, f)
         return ""
-
-    # Если ввели прямой путь к .exe
     if os.path.isfile(norm) and norm.lower().endswith(".exe"):
         return norm
-
-    # Если опустили расширение .exe
     if not norm.lower().endswith(".exe"):
         target = os.path.join(norm, "LibreHardwareMonitor.exe")
         if os.path.isfile(target):
             return target
-
     return ""
 
 
 def ensure_valid_lhm_path_on_disk():
-    """Checks existing lhm_path.txt or prompts user to specify the folder/executable"""
     current_path = ""
     if os.path.exists(LHM_PATH_FILE):
         try:
@@ -84,9 +73,6 @@ def ensure_valid_lhm_path_on_disk():
     print("=" * 70)
     print("      LIBRE HARDWARE MONITOR — INITIAL PATH CONFIGURATION      ")
     print("=" * 70)
-    if os.path.exists(LHM_PATH_FILE) and not current_path:
-        print("[WARNING] The previously configured path is invalid or executable was not found.")
-
     print("\nPlease enter the path to the folder containing LibreHardwareMonitor.exe")
     print("Hint: You can just copy and paste the folder path from Windows Explorer.")
     print(f"Default fallback: {DEFAULT_LHM_PATH}\n")
@@ -107,7 +93,6 @@ def ensure_valid_lhm_path_on_disk():
             print(f"\n[SUCCESS] LibreHardwareMonitor found: '{resolved}'")
             print(f"[SUCCESS] Saved to '{LHM_PATH_FILE}'")
 
-            # Автоматическая разблокировка DLL библиотеки от защиты Windows
             lhm_dir = os.path.dirname(resolved)
             dll_path = os.path.join(lhm_dir, "LibreHardwareMonitorLib.dll")
             if os.path.exists(dll_path):
@@ -116,7 +101,6 @@ def ensure_valid_lhm_path_on_disk():
                 print(f"[OK] Unblocked 'LibreHardwareMonitorLib.dll' successfully.\n")
             else:
                 print()
-
             return resolved
         else:
             print(f"\n[ERROR] 'LibreHardwareMonitor.exe' was NOT found in '{target_candidate}'!")
@@ -138,7 +122,6 @@ def extract_unit_from_value(val_str: str) -> str:
 def format_sensor_name_with_unit(base_name: str, val_str: str, s_type: str = "") -> str:
     name = str(base_name).strip()
     unit = extract_unit_from_value(val_str)
-
     if not unit:
         t = s_type.lower()
         if "temperature" in t: unit = "C"
@@ -149,10 +132,8 @@ def format_sensor_name_with_unit(base_name: str, val_str: str, s_type: str = "")
         elif "load" in t: unit = "%"
         elif "data" in t: unit = "GB"
 
-    if unit:
-        if not name.endswith(f"({unit})"):
-            return f"{name} ({unit})"
-
+    if unit and not name.endswith(f"({unit})"):
+        return f"{name} ({unit})"
     return name
 
 
@@ -187,7 +168,6 @@ class LHMWorker(QtCore.QThread):
                 if res.status_code == 200:
                     data = res.json()
                     self.connection_status.emit(True, "Connected to LibreHardwareMonitor Web API")
-
                     if not self._initial_tree_sent:
                         self.initial_tree_received.emit(data)
                         self._initial_tree_sent = True
@@ -214,7 +194,7 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sensors Configuration Wizard")
-        self.resize(1080, 750)
+        self.resize(980, 720)
         self.setStyleSheet("""
             QMainWindow, QWidget {
                 background-color: #0E0E0E;
@@ -265,34 +245,8 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
                 font-size: 8.5pt;
                 border: 1px solid #2C2C2C;
                 border-radius: 3px;
-                padding: 1px 4px;
-                min-height: 22px;
-                max-height: 22px;
-            }
-            QComboBox:disabled {
-                color: #555555;
-                border: 1px solid #222222;
-            }
-            QAbstractSpinBox {
-                background-color: #161616;
-                color: #00E5FF;
-                font-weight: bold;
-                font-size: 8.5pt;
-                border: 1px solid #2C2C2C;
-                border-radius: 3px;
-                padding: 1px 2px;
-                min-height: 22px;
-                max-height: 22px;
-            }
-            QAbstractSpinBox:disabled {
-                color: #555555;
-                border: 1px solid #222222;
-            }
-            QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
-                width: 0px;
-                height: 0px;
-                border: none;
-                background: transparent;
+                padding: 1px 6px;
+                min-height: 24px;
             }
             QLineEdit {
                 background-color: #161616;
@@ -300,7 +254,7 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
                 font-size: 8.5pt;
                 border: 1px solid #2C2C2C;
                 border-radius: 3px;
-                padding: 1px 5px;
+                padding: 2px 6px;
                 min-height: 22px;
                 max-height: 22px;
             }
@@ -339,8 +293,8 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
         """)
 
         self.profiles_db = self.load_initial_config()
-        self.current_profile = self.profiles_db.get("active_mode", "CPU")
-        self.sensor_items_map = {}
+        self.current_profile = "CPU" if "CPU" in self.profiles_db else list(self.profiles_db.keys())[0]
+        self.sensor_items_map = {}  # sid -> (item, edit_name)
         self.tree_initialized = False
 
         self.init_ui()
@@ -383,6 +337,7 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
 
+        # 1. Верхняя панель управления
         top_bar = QtWidgets.QHBoxLayout()
         top_bar.setSpacing(8)
 
@@ -444,35 +399,33 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
 
         layout.addLayout(top_bar)
 
+        # 2. Главное дерево: Sensor / Hardware, Value, Custom Name, Sensor ID
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setColumnCount(6)
-        self.tree.setHeaderLabels(["Sensor / Hardware", "Value", "Panel", "Order #", "Custom Name", "Sensor ID"])
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["Sensor / Hardware", "Value", "Custom Name", "Sensor ID"])
 
         header = self.tree.header()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Interactive)
 
         self.tree.setColumnWidth(1, 85)
-        self.tree.setColumnWidth(2, 65)
-        self.tree.setColumnWidth(3, 50)
-        self.tree.setColumnWidth(4, 180)
-        self.tree.setColumnWidth(5, 200)
+        self.tree.setColumnWidth(2, 220)
+        self.tree.setColumnWidth(3, 200)
 
         self.tree.itemChanged.connect(self.on_item_check_state_changed)
         layout.addWidget(self.tree, stretch=1)
 
-        self.lbl_stats = QtWidgets.QLabel("Check sensors, select Panel (P1/P2), Order, and optionally type a Custom Name.")
+        # 3. Информационная строка
+        self.lbl_stats = QtWidgets.QLabel("Check sensors to include in profile. Panels (P1/P2) and visual order are set directly in Analyzer.")
         self.lbl_stats.setStyleSheet("color: #888888; font-size: 8.5pt;")
         layout.addWidget(self.lbl_stats)
 
     def update_profile_combo_items(self):
         self.combo_profile.blockSignals(True)
         self.combo_profile.clear()
-        modes = [k for k in self.profiles_db.keys() if k not in ("active_mode",)]
+        modes = [k for k in self.profiles_db.keys() if k != "active_mode"]
         if not modes:
             modes = ["CPU", "GPU"]
         self.combo_profile.addItems(modes)
@@ -497,7 +450,7 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
                 self.sync_tree_checkboxes_with_profile()
 
     def delete_current_profile_dialog(self):
-        active_modes = [k for k in self.profiles_db.keys() if k not in ("active_mode",)]
+        active_modes = [k for k in self.profiles_db.keys() if k != "active_mode"]
         if len(active_modes) <= 1:
             QtWidgets.QMessageBox.warning(self, "Delete Profile", "Cannot delete the only remaining profile.")
             return
@@ -511,7 +464,7 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
             if self.current_profile in self.profiles_db:
                 del self.profiles_db[self.current_profile]
 
-            remaining = [k for k in self.profiles_db.keys() if k not in ("active_mode",)]
+            remaining = [k for k in self.profiles_db.keys() if k != "active_mode"]
             self.current_profile = remaining[0] if remaining else "CPU"
             self.update_profile_combo_items()
             self.sync_tree_checkboxes_with_profile()
@@ -534,6 +487,15 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
                 ensure_lhm_running()
 
     def build_tree_from_data(self, data: dict):
+        # Автоматическое считывание и сохранение паспорта железа (CPU, GPU, Motherboard)
+        try:
+            _, system_metadata = extract_hardware_structure(data)
+            with open(HW_INFO_FILE, "w", encoding="utf-8") as hw_f:
+                json.dump(system_metadata, hw_f, indent=4, ensure_ascii=False)
+            print(f"[OK] Hardware profile saved to: '{HW_INFO_FILE}'")
+        except Exception as e:
+            print(f"[WARNING] Could not save hardware_info.json: {e}")
+
         self.tree.blockSignals(True)
         self.tree.clear()
         self.sensor_items_map.clear()
@@ -547,46 +509,31 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
                 children = node.get("Children", [])
 
                 if parent_item is None:
-                    item = QtWidgets.QTreeWidgetItem(self.tree, [text, str(val) if val is not None else "", "", "", "", ""])
+                    item = QtWidgets.QTreeWidgetItem(self.tree, [text, str(val) if val is not None else "", "", ""])
                     item.setExpanded(True)
                 else:
-                    item = QtWidgets.QTreeWidgetItem(parent_item, [text, str(val) if val is not None else "", "", "", "", ""])
+                    item = QtWidgets.QTreeWidgetItem(parent_item, [text, str(val) if val is not None else "", "", ""])
 
                 if s_id:
                     item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
                     item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
-                    is_p2_default = any(x in s_type.lower() for x in ["fan", "control", "rpm"])
-
-                    combo_panel = QtWidgets.QComboBox()
-                    combo_panel.addItems(["P1", "P2"])
-                    combo_panel.setCurrentText("P2" if is_p2_default else "P1")
-                    combo_panel.setEnabled(False)
-                    combo_panel.currentTextChanged.connect(self.update_stats_from_tree)
-                    self.tree.setItemWidget(item, 2, combo_panel)
-
-                    spin_order = QtWidgets.QSpinBox()
-                    spin_order.setRange(1, 99)
-                    spin_order.setValue(1)
-                    spin_order.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-                    spin_order.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                    spin_order.setEnabled(False)
-                    self.tree.setItemWidget(item, 3, spin_order)
-
+                    # Поле для редактирования кастомного имени
                     default_formatted = format_sensor_name_with_unit(text, str(val), s_type)
                     edit_name = QtWidgets.QLineEdit()
                     edit_name.setText(default_formatted)
                     edit_name.setEnabled(False)
-                    self.tree.setItemWidget(item, 4, edit_name)
+                    self.tree.setItemWidget(item, 2, edit_name)
 
-                    item.setText(5, s_id)
-                    item.setForeground(5, QtGui.QBrush(QtGui.QColor("#666666")))
+                    # Sensor ID
+                    item.setText(3, s_id)
+                    item.setForeground(3, QtGui.QBrush(QtGui.QColor("#666666")))
 
                     item.setData(0, QtCore.Qt.ItemDataRole.UserRole, {
                         "id": s_id, "name": text, "type": s_type, "value": val, "is_checked": False
                     })
 
-                    self.sensor_items_map[s_id] = (item, combo_panel, spin_order, edit_name)
+                    self.sensor_items_map[s_id] = (item, edit_name)
                 else:
                     font = item.font(0)
                     font.setBold(True)
@@ -620,60 +567,29 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
         self.tree.blockSignals(True)
 
         prof_data = self.profiles_db.get(self.current_profile, {})
+        saved_names = {}
+        for s in prof_data.get("panel1_thermal_and_power", []) + prof_data.get("panel2_cooling_and_speed", []):
+            saved_names[s.get("id")] = s.get("name", "")
 
-        p1_map = {}
-        for idx, s in enumerate(prof_data.get("panel1_thermal_and_power", [])):
-            p1_map[s.get("id")] = (s.get("order", idx + 1), s.get("name", ""))
-
-        p2_map = {}
-        for idx, s in enumerate(prof_data.get("panel2_cooling_and_speed", [])):
-            p2_map[s.get("id")] = (s.get("order", idx + 1), s.get("name", ""))
-
-        checked_p1 = 0
-        checked_p2 = 0
-
-        for sid, (item, combo_panel, spin_order, edit_name) in self.sensor_items_map.items():
+        checked_count = 0
+        for sid, (item, edit_name) in self.sensor_items_map.items():
             data = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or {}
-
-            if sid in p1_map:
+            if sid in saved_names:
                 item.setCheckState(0, QtCore.Qt.CheckState.Checked)
                 data["is_checked"] = True
-                combo_panel.setEnabled(True)
-                combo_panel.blockSignals(True)
-                combo_panel.setCurrentText("P1")
-                combo_panel.blockSignals(False)
-                spin_order.setEnabled(True)
-                order_val, saved_name = p1_map[sid]
-                spin_order.setValue(order_val)
                 edit_name.setEnabled(True)
-                if saved_name:
-                    edit_name.setText(saved_name)
-                checked_p1 += 1
-            elif sid in p2_map:
-                item.setCheckState(0, QtCore.Qt.CheckState.Checked)
-                data["is_checked"] = True
-                combo_panel.setEnabled(True)
-                combo_panel.blockSignals(True)
-                combo_panel.setCurrentText("P2")
-                combo_panel.blockSignals(False)
-                spin_order.setEnabled(True)
-                order_val, saved_name = p2_map[sid]
-                spin_order.setValue(order_val)
-                edit_name.setEnabled(True)
-                if saved_name:
-                    edit_name.setText(saved_name)
-                checked_p2 += 1
+                if saved_names[sid]:
+                    edit_name.setText(saved_names[sid])
+                checked_count += 1
             else:
                 item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
                 data["is_checked"] = False
-                combo_panel.setEnabled(False)
-                spin_order.setEnabled(False)
                 edit_name.setEnabled(False)
 
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, data)
 
         self.tree.blockSignals(False)
-        self.update_stats_label(checked_p1, checked_p2)
+        self.update_stats_label(checked_count)
 
     def on_item_check_state_changed(self, item, column):
         if column != 0:
@@ -686,7 +602,7 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
         if sid not in self.sensor_items_map:
             return
 
-        _, combo_panel, spin_order, edit_name = self.sensor_items_map[sid]
+        _, edit_name = self.sensor_items_map[sid]
         is_checked = (item.checkState(0) == QtCore.Qt.CheckState.Checked)
         was_checked = data.get("is_checked", False)
 
@@ -695,9 +611,6 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
 
         data["is_checked"] = is_checked
         item.setData(0, QtCore.Qt.ItemDataRole.UserRole, data)
-
-        combo_panel.setEnabled(is_checked)
-        spin_order.setEnabled(is_checked)
         edit_name.setEnabled(is_checked)
 
         if is_checked and not was_checked:
@@ -707,70 +620,38 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
             if not edit_name.text().strip():
                 edit_name.setText(format_sensor_name_with_unit(raw_name, val_str, s_type))
 
-            target_panel = combo_panel.currentText()
-            existing_orders = []
-            for s_id, (it, c_p, s_o, _) in self.sensor_items_map.items():
-                if it.checkState(0) == QtCore.Qt.CheckState.Checked and s_id != sid:
-                    if c_p.currentText() == target_panel:
-                        existing_orders.append(s_o.value())
-
-            next_order = max(existing_orders) + 1 if existing_orders else 1
-            spin_order.setValue(next_order)
-
         self.update_stats_from_tree()
 
     def update_stats_from_tree(self):
-        p1_cnt = 0
-        p2_cnt = 0
-        for sid, (item, combo_panel, spin_order, _) in self.sensor_items_map.items():
-            if item.checkState(0) == QtCore.Qt.CheckState.Checked:
-                if combo_panel.currentText() == "P2":
-                    p2_cnt += 1
-                else:
-                    p1_cnt += 1
-        self.update_stats_label(p1_cnt, p2_cnt)
+        checked_count = sum(1 for it, _ in self.sensor_items_map.values() if it.checkState(0) == QtCore.Qt.CheckState.Checked)
+        self.update_stats_label(checked_count)
 
-    def update_stats_label(self, p1_cnt, p2_cnt):
-        self.lbl_stats.setText(
-            f"Profile <b>[{self.current_profile}]</b>: "
-            f"<span style='color:#00E5FF;'>{p1_cnt} sensors in Panel 1</span> | "
-            f"<span style='color:#33FF57;'>{p2_cnt} sensors in Panel 2</span> (Sorted by Order #)"
-        )
+    def update_stats_label(self, count):
+        self.lbl_stats.setText(f"Profile <b>[{self.current_profile}]</b>: <span style='color:#00E5FF;'>{count} sensors selected</span>. (Reorder & Panel splitting are configured in Analyzer)")
 
     def save_current_tree_to_profile_memory(self):
-        p1_entries = []
-        p2_entries = []
+        p1_list = []
+        p2_list = []
 
-        for sid, (item, combo_panel, spin_order, edit_name) in self.sensor_items_map.items():
+        for sid, (item, edit_name) in self.sensor_items_map.items():
             if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                 data = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or {}
                 raw_name = data.get("name", "Sensor")
                 s_type = data.get("type", "")
                 val_str = item.text(1) or data.get("value", "")
 
-                target_panel = combo_panel.currentText()
-                order_num = spin_order.value()
-
                 custom_name = edit_name.text().strip()
                 if not custom_name:
                     custom_name = format_sensor_name_with_unit(raw_name, val_str, s_type)
 
-                sensor_dict = {
-                    "order": order_num,
-                    "id": sid,
-                    "name": custom_name
-                }
+                sensor_entry = {"id": sid, "name": custom_name}
 
-                if target_panel == "P2":
-                    p2_entries.append((order_num, sensor_dict))
+                # Автораспределение по умолчанию (кулеры -> P2, тепло/нагрузка -> P1)
+                is_p2 = any(x in s_type.lower() for x in ["fan", "control", "rpm"])
+                if is_p2:
+                    p2_list.append(sensor_entry)
                 else:
-                    p1_entries.append((order_num, sensor_dict))
-
-        p1_entries.sort(key=lambda x: x[0])
-        p2_entries.sort(key=lambda x: x[0])
-
-        p1_list = [entry[1] for entry in p1_entries]
-        p2_list = [entry[1] for entry in p2_entries]
+                    p1_list.append(sensor_entry)
 
         if self.current_profile not in self.profiles_db:
             self.profiles_db[self.current_profile] = {
@@ -803,13 +684,9 @@ class SimpleSensorsWizard(QtWidgets.QMainWindow):
 #                      MAIN ENTRY POINT
 # =======================================================
 if __name__ == "__main__":
-    # 1. Проверяем или запрашиваем путь к LHM (поддерживает путь к папке)
     lhm_exe = ensure_valid_lhm_path_on_disk()
-
-    # 2. Автозапуск LHM от Администратора
     ensure_lhm_running(lhm_exe)
 
-    # 3. Открываем графический визард настройки датчиков
     app = QtWidgets.QApplication(sys.argv)
     win = SimpleSensorsWizard()
     win.show()
