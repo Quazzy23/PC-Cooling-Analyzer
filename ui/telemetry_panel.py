@@ -1,50 +1,46 @@
-"""
-Центральная панель аппаратных графиков (P1 - Теплофизика, P2 - Обороты и Шум)
-"""
+"""Центральная панель аппаратных графиков: теплофизика P1, обороты кулеров P2 и тулбар."""
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets
 
 from ui.viewboxes import CleanTimeViewBox
-from ui.styles import create_timeline_cursor, SPINBOX_CLEAN_QSS, BTN_CYAN_QSS, BTN_GREEN_QSS
+from ui.styles import (
+    create_timeline_cursor, SPINBOX_CLEAN_QSS, BTN_CYAN_QSS, BTN_GREEN_QSS,
+    SPLITTER_VERTICAL_QSS, PEN_AXIS, PEN_AXIS_TEXT, AXIS_LABEL_STYLE,
+    STATUS_LABEL_STYLE, CONTROLS_LABEL_STYLE
+)
+from core.texts import (
+    CHART_TITLE_1, CHART_TITLE_2, LBL_SMOOTH, LBL_STEP,
+    LBL_RAW_FOG, LBL_TREND_A, BTN_FIT_RAW, BTN_SAVE_RESULT,
+    AXIS_LABEL_TIME, AXIS_UNIT_S
+)
 
 
 class TelemetryPanel(QtWidgets.QWidget):
+    """Виджет центральной панели с графиками P1, P2 и панелью сглаживания/экспорта."""
     def __init__(self, parent_analyzer):
         super().__init__()
         self.analyzer = parent_analyzer
         self.setMinimumWidth(380)
-        
         self.init_ui()
 
     def init_ui(self):
+        """Сборка графиков P1, P2 и панели инструментов."""
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # Вертикальный сплиттер для графиков P1 и P2
+        # Вертикальный сплиттер между графиками P1 и P2
         self.v_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.v_splitter.setChildrenCollapsible(False)
-        self.v_splitter.setStyleSheet("""
-            QSplitter::handle:vertical {
-                background-color: #222222;
-                height: 5px;
-                margin: 2px 0px;
-                border-radius: 2px;
-            }
-            QSplitter::handle:vertical:hover {
-                background-color: #00E5FF;
-            }
-        """)
+        self.v_splitter.setStyleSheet(SPLITTER_VERTICAL_QSS)
 
         # 1. Верхний график: Теплофизика и питание (P1)
-        p1_title = "<span style='color: #FFFFFF; font-size: 10pt;'><b>1. Thermal & Electrical Parameters</b></span>"
-        self.p1_plot, self.vb1, self.cursor_line_p1 = self.create_telemetry_plot(p1_title)
+        self.p1_plot, self.vb1, self.cursor_line_p1 = self.create_telemetry_plot(CHART_TITLE_1)
         self.analyzer.setup_sensors_for_plot(self.analyzer.p1_sensors, self.p1_plot)
         self.v_splitter.addWidget(self.p1_plot)
 
         # 2. Нижний график: Обороты и Шум (P2)
-        p2_title = "<span style='color: #FFFFFF; font-size: 10pt;'><b>2. Cooling Speeds & Sound Level</b></span>"
-        self.p2_plot, self.vb2, self.cursor_line_p2 = self.create_telemetry_plot(p2_title, show_bottom_label=True)
+        self.p2_plot, self.vb2, self.cursor_line_p2 = self.create_telemetry_plot(CHART_TITLE_2, show_bottom_label=True)
         self.vb2.setXLink(self.vb1)
         self.analyzer.setup_sensors_for_plot(self.analyzer.p2_sensors, self.p2_plot)
         self.v_splitter.addWidget(self.p2_plot)
@@ -57,8 +53,8 @@ class TelemetryPanel(QtWidgets.QWidget):
         controls_layout.setContentsMargins(2, 2, 2, 2)
         controls_layout.setSpacing(6)
 
-        lbl_smooth = QtWidgets.QLabel("Smooth:")
-        lbl_smooth.setStyleSheet("color: #888888; font-size: 8.5pt;")
+        lbl_smooth = QtWidgets.QLabel(LBL_SMOOTH)
+        lbl_smooth.setStyleSheet(CONTROLS_LABEL_STYLE)
         controls_layout.addWidget(lbl_smooth)
 
         self.spin_smooth = QtWidgets.QSpinBox()
@@ -69,8 +65,8 @@ class TelemetryPanel(QtWidgets.QWidget):
         self.spin_smooth.valueChanged.connect(self.analyzer.on_smooth_changed)
         controls_layout.addWidget(self.spin_smooth)
 
-        lbl_step = QtWidgets.QLabel("Step:")
-        lbl_step.setStyleSheet("color: #888888; font-size: 8.5pt;")
+        lbl_step = QtWidgets.QLabel(LBL_STEP)
+        lbl_step.setStyleSheet(CONTROLS_LABEL_STYLE)
         controls_layout.addWidget(lbl_step)
 
         self.spin_step = QtWidgets.QSpinBox()
@@ -82,8 +78,8 @@ class TelemetryPanel(QtWidgets.QWidget):
         self.spin_step.valueChanged.connect(self.analyzer.on_step_changed)
         controls_layout.addWidget(self.spin_step)
 
-        lbl_raw = QtWidgets.QLabel("Raw Fog:")
-        lbl_raw.setStyleSheet("color: #888888; font-size: 8.5pt;")
+        lbl_raw = QtWidgets.QLabel(LBL_RAW_FOG)
+        lbl_raw.setStyleSheet(CONTROLS_LABEL_STYLE)
         controls_layout.addWidget(lbl_raw)
 
         self.spin_raw = QtWidgets.QDoubleSpinBox()
@@ -95,8 +91,8 @@ class TelemetryPanel(QtWidgets.QWidget):
         self.spin_raw.valueChanged.connect(self.analyzer.on_raw_alpha_changed)
         controls_layout.addWidget(self.spin_raw)
 
-        lbl_trend = QtWidgets.QLabel("Trend A:")
-        lbl_trend.setStyleSheet("color: #888888; font-size: 8.5pt;")
+        lbl_trend = QtWidgets.QLabel(LBL_TREND_A)
+        lbl_trend.setStyleSheet(CONTROLS_LABEL_STYLE)
         controls_layout.addWidget(lbl_trend)
 
         self.spin_trend = QtWidgets.QDoubleSpinBox()
@@ -110,28 +106,29 @@ class TelemetryPanel(QtWidgets.QWidget):
 
         controls_layout.addSpacing(2)
 
-        self.btn_fit = QtWidgets.QPushButton("Fit: Raw")
+        self.btn_fit = QtWidgets.QPushButton(BTN_FIT_RAW)
         self.btn_fit.setFixedSize(78, 26)
         self.btn_fit.setStyleSheet(BTN_CYAN_QSS)
         self.btn_fit.clicked.connect(self.analyzer.toggle_y_fit)
         controls_layout.addWidget(self.btn_fit)
 
-        self.btn_save = QtWidgets.QPushButton("Save Result")
+        self.btn_save = QtWidgets.QPushButton(BTN_SAVE_RESULT)
         self.btn_save.setFixedSize(92, 26)
         self.btn_save.setStyleSheet(BTN_GREEN_QSS)
         self.btn_save.clicked.connect(self.analyzer.save_result_action)
         controls_layout.addWidget(self.btn_save)
 
-        # Текстовый статус координат справа от кнопки Save Result
+        # Текстовый статус координат справа
         self.lbl_telemetry_status = QtWidgets.QLabel("")
         self.lbl_telemetry_status.setFixedHeight(30)
         self.lbl_telemetry_status.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.lbl_telemetry_status.setStyleSheet("color: #888888; font-size: 8pt; font-family: 'Segoe UI', Arial, sans-serif;")
+        self.lbl_telemetry_status.setStyleSheet(STATUS_LABEL_STYLE)
         controls_layout.addWidget(self.lbl_telemetry_status, stretch=1)
 
         layout.addLayout(controls_layout)
 
     def create_telemetry_plot(self, title_html: str, show_bottom_label: bool = False):
+        """Фабрика создания графического виджета телеметрии с курсором времени."""
         vb = CleanTimeViewBox(self.analyzer)
         plot = pg.PlotWidget(viewBox=vb)
         vb.plot_widget = plot
@@ -140,16 +137,16 @@ class TelemetryPanel(QtWidgets.QWidget):
         plot.setTitle(title_html, justify='left')
         plot.hideAxis('left')
         plot.hideAxis('right')
-        
+
         b_axis = plot.getAxis('bottom')
-        b_axis.setPen(pg.mkPen('#444444', width=1))
-        b_axis.setTextPen(pg.mkPen('#AAAAAA'))
+        b_axis.setPen(PEN_AXIS)
+        b_axis.setTextPen(PEN_AXIS_TEXT)
         b_axis.enableAutoSIPrefix(True)
 
         plot.plotItem.layout.setContentsMargins(55, 0, 55, 0)
 
         if show_bottom_label:
-            plot.setLabel('bottom', 'Time', units='s', **{'color': '#AAAAAA', 'font-size': '8.5pt'})
+            plot.setLabel('bottom', AXIS_LABEL_TIME, units=AXIS_UNIT_S, **AXIS_LABEL_STYLE)
 
         cursor = create_timeline_cursor()
         plot.addItem(cursor, ignoreBounds=True)

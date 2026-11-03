@@ -1,22 +1,27 @@
 """
-Единый модуль ViewBox проекта (PyQt6 + PyQtGraph) с нулевым дублированием:
-- BaseInteractiveViewBox: ЕДИНСТВЕННЫЙ обработчик Pan (СКМ), Zoom (Alt/Shift), Scroll (Wheel),
-  ЛКМ-курсора (Seek/Scrub), ПКМ-выделения (1D / 2D) и нативного Hover-трекинга (hoverEvent)
-- CleanTimeViewBox: Графики датчиков (синхронные зоны P1/P2 + зум шкал по кнопке M)
-- FFTFilterViewBox: Live FFT спектр (1D полоса частот)
-- SpectrogramTimelineViewBox: 2D-Спектрограмма (2D бокс Время x Частота)
-- OverlayViewBox: Пассивный оверлей для независимых осей Y
+Интерактивные элементы ViewBox:
+- BaseInteractiveViewBox: базовая обработка событий мыши (Pan, Zoom, Seek, Drag, Hover).
+- CleanTimeViewBox: синхронные графики телеметрии с независимыми осями и блокировкой [B].
+- FFTFilterViewBox: спектр Live FFT с полосовыми частотными фильтрами.
+- SpectrogramTimelineViewBox: 2D-спектрограмма с выделением частотно-временных боксов.
+- OverlayViewBox: пассивный контейнер для независимых шкал Y.
 """
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from core.defaults import AUDIO_PROFILE
-from ui.styles import create_clean_region, create_clean_2d_rect_item
+from ui.styles import (
+    create_clean_region, create_clean_2d_rect_item,
+    HUD_2LINE_HTML_TEMPLATE, HUD_1LINE_HTML_TEMPLATE
+)
+from core.texts import (
+    HUD_FFT_COORDS_TEMPLATE, HUD_SPEC_COORDS_TEMPLATE, TEXT_EMPTY_METRIC
+)
 
 
 def clamp_rigid_range(cur_range, min_limit, max_limit):
-    """Ограничивает диапазон без изменения масштаба (span)"""
+    """Ограничивает диапазон видимости без искажения масштаба."""
     span = cur_range[1] - cur_range[0]
     total_allowed = max_limit - min_limit
 
@@ -33,10 +38,7 @@ def clamp_rigid_range(cur_range, min_limit, max_limit):
 
 
 class BaseInteractiveViewBox(pg.ViewBox):
-    """
-    Базовый интерактивный ViewBox:
-    Содержит 100% логики мыши (СКМ Pan, Alt/Shift Zoom, Wheel Scroll, ЛКМ Seek, ПКМ Drag, Hover Telemetry)
-    """
+    """Базовый класс с полной обработкой мыши (СКМ Pan, Alt/Shift Zoom, ЛКМ Seek, ПКМ Drag)."""
     def __init__(self, analyzer_ref=None, enable_time_seek=False, is_2d_selection=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.analyzer = analyzer_ref
@@ -47,14 +49,16 @@ class BaseInteractiveViewBox(pg.ViewBox):
         self.temp_selection_item = None
         self.setMouseMode(pg.ViewBox.RectMode)
 
-    # 1. Лимиты осей
     def get_x_limits(self):
+        """Возвращает пределы оси X."""
         return 0.0, float(getattr(self.analyzer, 'total_duration', 100.0))
 
     def get_y_limits(self):
+        """Возвращает пределы оси Y."""
         return 0.0, 100.0
 
     def clamp_view(self):
+        """Удерживает границы графика в жестких пределах."""
         min_x_lim, max_x_lim = self.get_x_limits()
         min_y_lim, max_y_lim = self.get_y_limits()
         new_x_min, new_x_max = clamp_rigid_range(self.viewRange()[0], min_x_lim, max_x_lim)
@@ -62,7 +66,7 @@ class BaseInteractiveViewBox(pg.ViewBox):
         self.setRange(xRange=[new_x_min, new_x_max], yRange=[new_y_min, new_y_max], padding=0)
 
     def _get_status_labels(self):
-        """Возвращает (активная_метка, неактивная_метка_другой_панели)"""
+        """Возвращает целевую и соседнюю метки строки статуса."""
         tel_panel = getattr(self.analyzer, 'telemetry_panel', None)
         tel_lbl = getattr(tel_panel, 'lbl_telemetry_status', None) if tel_panel else getattr(self.analyzer, 'lbl_telemetry_status', None)
 
@@ -75,6 +79,7 @@ class BaseInteractiveViewBox(pg.ViewBox):
             return (aud_lbl or tel_lbl), (tel_lbl if aud_lbl else None)
 
     def hoverEvent(self, ev):
+        """Отслеживает координаты мыши и форматирует статусную строку."""
         target_lbl, other_lbl = self._get_status_labels()
 
         if other_lbl is not None:
@@ -91,26 +96,17 @@ class BaseInteractiveViewBox(pg.ViewBox):
 
             if coords_str is not None:
                 if top_time is not None:
-                    formatted_text = (
-                        f"<div align='right' style='font-size: 7.5pt; font-family: Segoe UI, sans-serif; line-height: 110%;'>"
-                        f"<span style='color: #AAAAAA; font-weight: bold;'>{top_time}</span><br>"
-                        f"<span style='color: #777777;'>{coords_str}</span>"
-                        f"</div>"
-                    )
+                    formatted_text = HUD_2LINE_HTML_TEMPLATE.format(time=top_time, coords=coords_str)
                 else:
-                    formatted_text = (
-                        f"<div align='right' style='font-size: 7.5pt; font-family: Segoe UI, sans-serif;'>"
-                        f"<span style='color: #777777;'>{coords_str}</span>"
-                        f"</div>"
-                    )
+                    formatted_text = HUD_1LINE_HTML_TEMPLATE.format(coords=coords_str)
                 target_lbl.setText(formatted_text)
 
     def get_status_telemetry(self, view_pos, scene_pos):
-        """Возвращает (top_time_str, coords_str) для нижней строки статуса"""
+        """Хук получения координат: возвращает (время, строка_значений)."""
         return None, None
 
-    # 3. Единое панорамирование (СКМ)
     def mousePressEvent(self, ev):
+        """Начало панорамирования по клику средней кнопки мыши."""
         if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
             ev.accept()
             self.panning_data = {
@@ -123,6 +119,7 @@ class BaseInteractiveViewBox(pg.ViewBox):
             super().mousePressEvent(ev)
 
     def mouseReleaseEvent(self, ev):
+        """Завершение панорамирования."""
         if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
             ev.accept()
             self.panning_data = None
@@ -130,6 +127,7 @@ class BaseInteractiveViewBox(pg.ViewBox):
             super().mouseReleaseEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        """Смещение графика при перетаскивании средней кнопкой мыши."""
         if self.panning_data is not None:
             ev.accept()
             delta = ev.scenePos() - self.panning_data['start_pos']
@@ -149,8 +147,8 @@ class BaseInteractiveViewBox(pg.ViewBox):
         else:
             super().mouseMoveEvent(ev)
 
-    # 4. Единое колесо мыши
     def wheelEvent(self, ev, axis=None):
+        """Зум колесом мыши: Alt (ось X), Shift (ось Y), скролл (сдвиг по времени)."""
         modifiers = QtWidgets.QApplication.keyboardModifiers()
         delta = ev.delta()
         scale = 0.82 if delta > 0 else 1.22
@@ -174,8 +172,8 @@ class BaseInteractiveViewBox(pg.ViewBox):
                 self.clamp_view()
             ev.accept()
 
-    # 5. Единые клики
     def mouseClickEvent(self, ev):
+        """Обработка ЛКМ (курсор времени) и ПКМ (сброс выделения)."""
         if self.enable_time_seek and ev.button() == QtCore.Qt.MouseButton.LeftButton:
             pos = self.mapToView(ev.pos())
             t = max(0.0, min(float(getattr(self.analyzer, 'total_duration', 100.0)), pos.x()))
@@ -187,8 +185,8 @@ class BaseInteractiveViewBox(pg.ViewBox):
         else:
             ev.ignore()
 
-    # 6. Единый Драг
     def mouseDragEvent(self, ev, axis=None):
+        """Выделение областей правой кнопкой мыши (1D полосы или 2D боксы)."""
         if self.enable_time_seek and ev.button() == QtCore.Qt.MouseButton.LeftButton:
             ev.accept()
             pos = self.mapToView(ev.pos())
@@ -218,17 +216,16 @@ class BaseInteractiveViewBox(pg.ViewBox):
         else:
             ev.ignore()
 
-    # Вспомогательные хуки
     def zoom_y(self, scale, mouse_scene):
+        """Базовый зум по оси Y."""
         self.scaleBy(x=1.0, y=scale, center=self.mapSceneToView(mouse_scene))
 
     def get_active_overlay_ranges(self): return {}
     def pan_overlays(self, delta_y_pixels, height): pass
-
-    def clear_existing_regions(self):
-        pass
+    def clear_existing_regions(self): pass
 
     def start_temp_selection(self, x, y):
+        """Создает временную рамку выделения при зажатии ПКМ."""
         if self.is_2d_selection:
             self.temp_selection_item = create_clean_2d_rect_item(QtCore.QRectF(0, 0, 0, 0))
         else:
@@ -236,6 +233,7 @@ class BaseInteractiveViewBox(pg.ViewBox):
         self.addItem(self.temp_selection_item, ignoreBounds=True)
 
     def update_temp_selection(self, x_min, x_max, y_min, y_max):
+        """Обновляет геометрию рамки при движении мыши."""
         if self.temp_selection_item is not None:
             if self.is_2d_selection:
                 self.temp_selection_item.setRect(QtCore.QRectF(x_min, y_min, x_max - x_min, y_max - y_min))
@@ -243,6 +241,7 @@ class BaseInteractiveViewBox(pg.ViewBox):
                 self.temp_selection_item.setRegion([x_min, x_max])
 
     def finish_temp_selection(self, x_min, x_max, y_min, y_max):
+        """Удаляет временную рамку и передает координаты для создания региона."""
         if self.temp_selection_item is not None:
             self.removeItem(self.temp_selection_item)
             self.temp_selection_item = None
@@ -252,12 +251,8 @@ class BaseInteractiveViewBox(pg.ViewBox):
     def on_right_click(self, view_pos): pass
 
 
-# =======================================================
-#               СПЕЦИАЛИЗИРОВАННЫЕ КЛАССЫ
-# =======================================================
-
 class OverlayViewBox(pg.ViewBox):
-    """Пассивный оверлейный ViewBox для наложения множества независимых шкал Y"""
+    """Пассивный оверлейный ViewBox для наложения множества независимых шкал Y."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setMouseEnabled(x=False, y=False)
@@ -269,19 +264,19 @@ class OverlayViewBox(pg.ViewBox):
 
 
 class CleanTimeViewBox(BaseInteractiveViewBox):
-    """Графики датчиков ПК"""
+    """Специализированный ViewBox графиков телеметрии (P1 и P2)."""
     def __init__(self, analyzer_ref=None, plot_widget_ref=None, *args, **kwargs):
         super().__init__(analyzer_ref=analyzer_ref, enable_time_seek=True, is_2d_selection=False, *args, **kwargs)
         self.plot_widget = plot_widget_ref
         self.temp_region_p2 = None
 
     def _is_p1(self):
-        p1 = getattr(self.analyzer, 'p1_plot', None)
-        if p1 is None and hasattr(self.analyzer, 'telemetry_panel'):
-            p1 = getattr(self.analyzer.telemetry_panel, 'p1_plot', None)
+        """Определяет, относится ли этот график к Panel 1."""
+        p1 = getattr(self.analyzer.telemetry_panel, 'p1_plot', None) if hasattr(self.analyzer, 'telemetry_panel') else None
         return self.plot_widget == p1
 
     def get_status_telemetry(self, view_pos, scene_pos):
+        """Собирает значения активных датчиков под курсором."""
         is_p1 = self._is_p1()
         panel_label = "P1" if is_p1 else "P2"
         target_sensors = self.analyzer.p1_sensors if is_p1 else self.analyzer.p2_sensors
@@ -289,28 +284,32 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
 
         for s in target_sensors:
             k = s["key"]
-            # Учитываем только включенные датчики
             if k in self.analyzer.sensor_checkboxes and self.analyzer.sensor_checkboxes[k].isChecked():
                 if k in self.analyzer.viewboxes_map:
                     vb = self.analyzer.viewboxes_map[k]
                     val = vb.mapSceneToView(scene_pos).y()
                     if "volt" in k.lower():
                         val_str = f"{val:.3f}"
-                    elif "RPM" in s["label"] or "clock" in s["label"].lower():
+                    elif "rpm" in s["label"].lower() or "clock" in s["label"].lower():
                         val_str = f"{val:.0f}"
                     else:
                         val_str = f"{val:.1f}"
                     values_list.append(val_str)
 
-        sensors_str = f"{panel_label}: {' | '.join(values_list)}" if values_list else f"{panel_label}: —"
+        sensors_str = f"{panel_label}: {' | '.join(values_list)}" if values_list else f"{panel_label}: {TEXT_EMPTY_METRIC}"
         t_sec = max(0.0, min(float(getattr(self.analyzer, 'total_duration', 100.0)), view_pos.x()))
         return f"{t_sec:.1f}s", sensors_str
 
     def get_active_overlay_ranges(self):
-        # Собираем только те датчики, у которых кнопка [B] ВЫКЛЮЧЕНА (False)
-        return {k: vb.viewRange()[1] for k, vb in self.analyzer.viewboxes_map.items() if not self.analyzer.sensor_move_active.get(k, False)}
+        """Возвращает диапазоны Y только для датчиков, где блокировка [B] выключена."""
+        return {
+            k: vb.viewRange()[1]
+            for k, vb in self.analyzer.viewboxes_map.items()
+            if not self.analyzer.sensor_move_active.get(k, False)
+        }
 
     def pan_overlays(self, delta_y_pixels, height):
+        """Смещает оверлейные шкалы Y при панорамировании."""
         for k, start_vr_y in self.panning_data.get('overlay_ranges', {}).items():
             if k in self.analyzer.viewboxes_map:
                 vb = self.analyzer.viewboxes_map[k]
@@ -332,13 +331,12 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
                     ax.update()
 
     def zoom_y(self, scale, mouse_scene):
+        """Масштабирует оси Y только для датчиков с неактивной кнопкой [B]."""
         is_p1 = self._is_p1()
         target_sensors = self.analyzer.p1_sensors if is_p1 else self.analyzer.p2_sensors
         target_keys = {s["key"] for s in target_sensors}
 
         for k, vb in self.analyzer.viewboxes_map.items():
-            # Зум РАЗРЕШЕН по умолчанию (когда кнопка [B] выключена, т.е. False)
-            # Если кнопка [B] включена (True), зум блокируется
             is_blocked = self.analyzer.sensor_move_active.get(k, False)
             if k in target_keys and not is_blocked:
                 vr_y = vb.viewRange()[1]
@@ -361,58 +359,59 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
                     ax.update()
 
     def start_temp_selection(self, x, y):
+        """Создает временные рамки одновременно на P1 и P2."""
         self.temp_selection_item = create_clean_region(x, x)
         self.temp_region_p2 = create_clean_region(x, x)
         if hasattr(self.analyzer, 'telemetry_panel'):
             self.analyzer.telemetry_panel.p1_plot.addItem(self.temp_selection_item, ignoreBounds=True)
             self.analyzer.telemetry_panel.p2_plot.addItem(self.temp_region_p2, ignoreBounds=True)
-        elif hasattr(self.analyzer, 'p1_plot'):
-            self.analyzer.p1_plot.addItem(self.temp_selection_item, ignoreBounds=True)
-            self.analyzer.p2_plot.addItem(self.temp_region_p2, ignoreBounds=True)
 
     def update_temp_selection(self, x_min, x_max, y_min, y_max):
+        """Синхронно расширяет границы рамок на P1 и P2."""
         if self.temp_selection_item is not None:
             self.temp_selection_item.setRegion([x_min, x_max])
         if self.temp_region_p2 is not None:
             self.temp_region_p2.setRegion([x_min, x_max])
 
     def finish_temp_selection(self, x_min, x_max, y_min, y_max):
+        """Удаляет временные рамки с обоих графиков и создает постоянный регион."""
         if self.temp_selection_item is not None:
             if hasattr(self.analyzer, 'telemetry_panel'):
                 self.analyzer.telemetry_panel.p1_plot.removeItem(self.temp_selection_item)
-            elif hasattr(self.analyzer, 'p1_plot'):
-                self.analyzer.p1_plot.removeItem(self.temp_selection_item)
             self.temp_selection_item = None
         if self.temp_region_p2 is not None:
             if hasattr(self.analyzer, 'telemetry_panel'):
                 self.analyzer.telemetry_panel.p2_plot.removeItem(self.temp_region_p2)
-            elif hasattr(self.analyzer, 'p2_plot'):
-                self.analyzer.p2_plot.removeItem(self.temp_region_p2)
             self.temp_region_p2 = None
         self.on_region_selected(x_min, x_max, y_min, y_max)
 
     def on_region_selected(self, x_min, x_max, y_min, y_max):
+        """Создает регион в модели данных, если он шире 100 мс."""
         if (x_max - x_min) > 0.1:
             self.analyzer.add_time_region(x_min, x_max)
 
     def clear_existing_regions(self):
+        """Сбрасывает выделенные временные области телеметрии."""
         if hasattr(self.analyzer, 'clear_all_time_regions'):
             self.analyzer.clear_all_time_regions()
 
     def on_right_click(self, view_pos):
+        """Обрабатывает клик ПКМ для удаления региона под курсором или всех регионов."""
         self.analyzer.handle_right_click_on_timeline(view_pos.x())
 
 
 class FFTFilterViewBox(BaseInteractiveViewBox):
-    """Live FFT Спектр"""
+    """ViewBox графика Live FFT спектра."""
     def __init__(self, analyzer_ref=None, *args, **kwargs):
         super().__init__(analyzer_ref=analyzer_ref, enable_time_seek=False, is_2d_selection=False, *args, **kwargs)
 
     def clear_existing_regions(self):
+        """Сбрасывает активные частотные фильтры аудио."""
         if hasattr(self.analyzer, 'clear_all_filters'):
             self.analyzer.clear_all_filters()
             
     def get_x_limits(self):
+        """Возвращает пределы оси частот (20 Гц - Найквист)."""
         f_min = AUDIO_PROFILE["limit_freq_min"]
         nyq = float(getattr(self.analyzer.engine, 'sample_rate', 48000) / 2.0)
         if hasattr(self.analyzer, 'freq_scale_mode') and self.analyzer.freq_scale_mode == "Log":
@@ -420,13 +419,13 @@ class FFTFilterViewBox(BaseInteractiveViewBox):
         return f_min, nyq
 
     def get_y_limits(self):
+        """Возвращает текущие пределы амплитуды dB SPL."""
         if hasattr(self.analyzer, 'audio_panel') and hasattr(self.analyzer.audio_panel, 'spin_ymin'):
             return float(self.analyzer.audio_panel.spin_ymin.value()), float(self.analyzer.audio_panel.spin_ymax.value())
-        elif hasattr(self.analyzer, 'spin_ymin'):
-            return float(self.analyzer.spin_ymin.value()), float(self.analyzer.spin_ymax.value())
         return -10.0, 40.0
 
     def get_status_telemetry(self, view_pos, scene_pos):
+        """Форматирует координаты спектра (Частота, Дб, Время)."""
         is_log = (getattr(self.analyzer, 'freq_scale_mode', 'Log') == "Log")
         freq = (10.0 ** view_pos.x()) if is_log else view_pos.x()
         freq_clamped = max(AUDIO_PROFILE["limit_freq_min"], min(AUDIO_PROFILE["limit_freq_max"], freq))
@@ -434,10 +433,11 @@ class FFTFilterViewBox(BaseInteractiveViewBox):
         cur_t = (self.analyzer.engine.current_sample_idx / self.analyzer.engine.sample_rate) if getattr(self.analyzer, 'engine', None) else 0.0
         
         top_time = f"{cur_t:.1f}s"
-        coords_str = f"P1: {freq_clamped:.0f} Hz | {db_val:.1f} dB | {cur_t:.1f}s"
+        coords_str = HUD_FFT_COORDS_TEMPLATE.format(freq=freq_clamped, db=db_val, time=cur_t)
         return top_time, coords_str
 
     def on_region_selected(self, x_min, x_max, y_min, y_max):
+        """Создает полосовой фильтр частот по выделению ПКМ."""
         if (x_max - x_min) > 0.01:
             is_log = hasattr(self.analyzer, 'freq_scale_mode') and self.analyzer.freq_scale_mode == "Log"
             f_min = (10.0 ** x_min) if is_log else x_min
@@ -445,36 +445,42 @@ class FFTFilterViewBox(BaseInteractiveViewBox):
             self.analyzer.add_filter_from_fft(f_min, f_max, x_min, x_max)
 
     def on_right_click(self, view_pos):
+        """Удаляет полосовой фильтр под курсором или очищает все."""
         is_log = hasattr(self.analyzer, 'freq_scale_mode') and self.analyzer.freq_scale_mode == "Log"
         f_click = (10.0 ** view_pos.x()) if is_log else view_pos.x()
         self.analyzer.remove_filter_at_pos(t_click=None, f_click=f_click, is_fft=True)
 
 
 class SpectrogramTimelineViewBox(BaseInteractiveViewBox):
-    """2D-Спектрограмма"""
+    """ViewBox графика 2D-спектрограммы таймлайна."""
     def __init__(self, analyzer_ref=None, *args, **kwargs):
         super().__init__(analyzer_ref=analyzer_ref, enable_time_seek=True, is_2d_selection=True, *args, **kwargs)
 
     def clear_existing_regions(self):
+        """Сбрасывает активные фильтры аудио."""
         if hasattr(self.analyzer, 'clear_all_filters'):
             self.analyzer.clear_all_filters()
             
     def get_y_limits(self):
+        """Возвращает пределы частот спектрограммы."""
         nyq = float(getattr(self.analyzer.engine, 'sample_rate', 48000) / 2.0)
         return AUDIO_PROFILE["limit_freq_min"], nyq
 
     def get_status_telemetry(self, view_pos, scene_pos):
+        """Форматирует координаты спектрограммы (Время, Частота, dB SPL в точке)."""
         t_mouse = max(0.0, min(float(getattr(self.analyzer, 'total_duration', 100.0)), view_pos.x()))
         freq_mouse = max(AUDIO_PROFILE["limit_freq_min"], min(AUDIO_PROFILE["limit_freq_max"], view_pos.y()))
         db_at_point = self.analyzer.get_spec_db_at(t_mouse, freq_mouse) if hasattr(self.analyzer, 'get_spec_db_at') else 0.0
 
         top_time = f"{t_mouse:.1f}s"
-        coords_str = f"P2: {t_mouse:.1f}s | {freq_mouse:.0f} Hz | {db_at_point:.1f} dB"
+        coords_str = HUD_SPEC_COORDS_TEMPLATE.format(time=t_mouse, freq=freq_mouse, db=db_at_point)
         return top_time, coords_str
 
     def on_region_selected(self, x_min, x_max, y_min, y_max):
+        """Создает 2D бокс фильтрации Время x Частота."""
         if (x_max - x_min) > 0.05 and (y_max - y_min) > 20:
             self.analyzer.add_2d_spectrogram_filter(x_min, x_max, y_min, y_max)
 
     def on_right_click(self, view_pos):
+        """Удаляет 2D фильтр под курсором или очищает все."""
         self.analyzer.remove_filter_at_pos(t_click=view_pos.x(), f_click=view_pos.y(), is_fft=False)

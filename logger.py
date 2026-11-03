@@ -1,7 +1,4 @@
-"""
-Главный универсальный логгер телеметрии датчиков и синхронной аудиозаписи
-Стандартный чистый консольный вывод (без сторонних библиотек).
-"""
+"""Главный универсальный логгер телеметрии датчиков и синхронной аудиозаписи."""
 import os
 import sys
 sys.dont_write_bytecode = True
@@ -9,14 +6,25 @@ import time
 import csv
 import json
 import requests
+from collections import deque
 import numpy as np
 import sounddevice as sd
 
 from utils.lhm_client import (
     LHM_URL, ensure_lhm_running, close_lhm_process,
-    flatten_json_tree, extract_hardware_structure
+    flatten_json_tree
 )
 from core.defaults import get_available_profiles, load_sensor_profile, AUDIO_PROFILE
+from core.texts import (
+    MSG_AUDIO_CONFIG_NOT_FOUND, MSG_AUDIO_LOGGING_DISABLED, MSG_NO_MIC_FOUND,
+    MSG_AUDIO_STREAM_ACTIVE, MSG_AUDIO_START_FAIL, MSG_AUDIO_SAVED,
+    MSG_CONNECTING_LHM, MSG_CONNECTED_LHM, MSG_ERR_CONNECT_LHM,
+    MSG_DISCOVERY_COMPLETE, MSG_MONITORED_PROFILES, MSG_HOST_PC,
+    MSG_LOGGING_ALL, MSG_RECORDING_AUDIO, MSG_PRESS_CTRL_C,
+    MSG_LOGGING_STOPPED, MSG_CSV_SAVED, LABEL_SOUND_LEVEL,
+    LABEL_ELAPSED_TIME, LABEL_BUFFER_WINDOW, HINT_PRESS_CTRL_C,
+    VALUE_NA, HEADER_TIME_SEC, ID_TIME_SEC, ID_AUDIO_SOUND
+)
 
 # Включаем поддержку ANSI-последовательностей в Windows
 os.system("")
@@ -27,23 +35,21 @@ POSTFIX = "test"     # Постфикс имени лога
 
 CLOSE_LHM_ON_EXIT = 1 # 1 = закрывать LHM при выходе, 0 = оставлять в трее
 
-# --- Ограничение размера файла (Кольцевой FIFO-буфер) ---
+# Ограничение размера файла (Кольцевой FIFO-буфер)
 ENABLE_BUFFER_LIMIT = True
 BUFFER_MAX_SAMPLES = 5000
 
-# Фиксируем пути строго к корню проекта независимо от того, где открыт терминал
+# Фиксируем пути строго к корню проекта
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
-TELEMETRY_LOGS_DIR = os.path.join(RESULTS_DIR, "raw_telemetry")
-AUDIO_LOGS_DIR = os.path.join(RESULTS_DIR, "raw_audio")
+RUN_DIR = os.path.join(RESULTS_DIR, POSTFIX)
 SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
 
-os.makedirs(TELEMETRY_LOGS_DIR, exist_ok=True)
-os.makedirs(AUDIO_LOGS_DIR, exist_ok=True)
+os.makedirs(RUN_DIR, exist_ok=True)
 os.makedirs(SYS_INFO_DIR, exist_ok=True)
 
-CSV_FILENAME = os.path.join(TELEMETRY_LOGS_DIR, f"table_raw_{POSTFIX}.csv")
+CSV_FILENAME = os.path.join(RUN_DIR, f"table_{POSTFIX}.csv")
 HW_INFO_FILENAME = os.path.join(SYS_INFO_DIR, "hardware_info.json")
 AUDIO_CFG_FILE = os.path.join(SYS_INFO_DIR, "audio_config.json")
 
@@ -55,7 +61,7 @@ for mode in all_modes:
     prof = load_sensor_profile(mode)
     s_list = []
     for s in prof.get("panel1_sensors", []) + prof.get("panel2_sensors", []):
-        if s["id"] != "/audio/0/sound/0":
+        if s["id"] != ID_AUDIO_SOUND:
             s_list.append(s)
     if s_list:
         profile_sensors[mode] = s_list
@@ -70,12 +76,13 @@ except ImportError:
     HAS_LAME = False
 
 AUDIO_EXT = ".mp3" if HAS_LAME else ".wav"
-AUDIO_FILENAME = os.path.join(AUDIO_LOGS_DIR, f"audio_raw_{POSTFIX}{AUDIO_EXT}")
+AUDIO_FILENAME = os.path.join(RUN_DIR, f"audio_{POSTFIX}{AUDIO_EXT}")
 
 
 class AudioRecorder:
-    """Фоновый рекордер синхронной аудиодорожки и расчет уровня шума (dBA)"""
+    """Фоновый рекордер синхронной аудиодорожки и расчет уровня шума (dBA)."""
     def __init__(self, filename: str, cfg_path: str):
+        """Инициализация аудиопотока и кодировщика MP3/WAV."""
         self.filename = filename
         self.current_sound_dba = None
         self.is_active = False
@@ -85,6 +92,7 @@ class AudioRecorder:
         self.audio_file = None
 
         if not os.path.exists(cfg_path):
+            print(MSG_AUDIO_CONFIG_NOT_FOUND)
             return
 
         try:
@@ -92,6 +100,7 @@ class AudioRecorder:
                 acfg = json.load(f)
 
             if not acfg.get("audio_logging_enabled", False):
+                print(MSG_AUDIO_LOGGING_DISABLED)
                 return
 
             saved_idx = acfg.get("device_index")
@@ -117,6 +126,7 @@ class AudioRecorder:
                     self.mic_name = devices[target_idx]['name']
 
             if target_idx is None:
+                print(MSG_NO_MIC_FOUND)
                 return
 
             dev_info = sd.query_devices(target_idx)
@@ -137,6 +147,7 @@ class AudioRecorder:
                 self.audio_file.setframerate(sr)
 
             def audio_callback(indata, frames, time_info, status):
+                """Потоковый callback: расчет dBA и запись порции сэмплов."""
                 mono_sig = indata[:, 0] if indata.ndim > 1 else indata
                 sig = np.nan_to_num(mono_sig, nan=0.0, posinf=0.0, neginf=0.0)
                 sig = np.clip(sig, -1.0, 1.0)
@@ -162,10 +173,12 @@ class AudioRecorder:
             )
             self.stream.start()
             self.is_active = True
-        except Exception:
-            pass
+            print(MSG_AUDIO_STREAM_ACTIVE.format(mic=self.mic_name[:30], ext=AUDIO_EXT))
+        except Exception as e:
+            print(MSG_AUDIO_START_FAIL.format(err=e))
 
     def close(self):
+        """Безопасная остановка потока и финализация файла."""
         if self.stream is not None:
             try:
                 self.stream.stop()
@@ -178,10 +191,12 @@ class AudioRecorder:
                 if tail:
                     self.audio_file.write(tail)
                 self.audio_file.close()
+                print(MSG_AUDIO_SAVED.format(ext="MP3", file=self.filename))
             except Exception: pass
         elif self.audio_file:
             try:
                 self.audio_file.close()
+                print(MSG_AUDIO_SAVED.format(ext="WAV", file=self.filename))
             except Exception: pass
 
 
@@ -189,14 +204,15 @@ class AudioRecorder:
 ensure_lhm_running()
 
 # 2. Подключение к Web API
+print(MSG_CONNECTING_LHM.format(url=LHM_URL))
 session = requests.Session()
 try:
     res = session.get(LHM_URL, timeout=2.0)
     res.raise_for_status()
     raw_json = res.json()
-except Exception as e:
-    print(f"\n[ERROR] Could not connect to LibreHardwareMonitor at {LHM_URL}")
-    print("Ensure LibreHardwareMonitor.exe is running and 'Remote Web Server' is enabled.")
+    print(MSG_CONNECTED_LHM)
+except Exception:
+    print(MSG_ERR_CONNECT_LHM.format(url=LHM_URL))
     sys.exit(1)
 
 # 3. Инициализация аудиозаписи
@@ -217,18 +233,18 @@ if os.path.exists(HW_INFO_FILENAME):
 # 5. Первичное сканирование всех доступных датчиков
 sensor_map = {}
 flatten_json_tree(raw_json, sensor_map)
-print(f"\n[OK] Discovery complete. Total active sensors found: {len(sensor_map)}")
-print("Monitored Profiles:")
+print(MSG_DISCOVERY_COMPLETE.format(count=len(sensor_map)))
+print(MSG_MONITORED_PROFILES)
 for mode, s_list in profile_sensors.items():
     print(f" • [{mode}]: {len(s_list)} sensors")
-print(f"Host PC: {pc_name}")
+print(MSG_HOST_PC.format(pc=pc_name))
 for hw in components:
     print(f" • {hw['name']} [{hw.get('type', 'Other')}]")
 print()
 
 # 6. Заголовки CSV
-row_names = ["Time_Sec"]
-row_ids   = ["TIME_SEC"]
+row_names = [HEADER_TIME_SEC]
+row_ids   = [ID_TIME_SEC]
 active_sensor_ids = []
 
 for sid, sinfo in sensor_map.items():
@@ -238,14 +254,12 @@ for sid, sinfo in sensor_map.items():
 
 if recorder.is_active:
     row_names.append(f"Sound Level ({recorder.mic_name})")
-    row_ids.append("/audio/0/sound/0")
+    row_ids.append(ID_AUDIO_SOUND)
 
-print(f"Logging ALL {len(sensor_map)} sensors to CSV: {CSV_FILENAME}")
+print(MSG_LOGGING_ALL.format(count=len(sensor_map), file=CSV_FILENAME))
 if recorder.is_active:
-    print(f"Recording raw audio stream to: {AUDIO_FILENAME}")
-print("Press Ctrl+C to stop logging.\n")
-
-from collections import deque
+    print(MSG_RECORDING_AUDIO.format(file=AUDIO_FILENAME))
+print(MSG_PRESS_CTRL_C)
 
 start_time = time.time()
 first_run = True
@@ -255,16 +269,17 @@ tick_count = 0
 # Кольцевой буфер строк данных
 row_buffer = deque(maxlen=BUFFER_MAX_SAMPLES if ENABLE_BUFFER_LIMIT else None)
 
+
 def flush_buffer_to_disk():
-    """Сбрасывает текущий кольцевой буфер на диск со стандартными 2-строчными заголовками"""
+    """Сбрасывает текущий кольцевой буфер на диск со стандартными 2-строчными заголовками."""
     with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(row_names)
         w.writerow(row_ids)
         w.writerows(row_buffer)
 
+
 # 7. Главный цикл логирования
-# Если буфер отключен, держим открытый файловый дескриптор для бесконечной записи
 file_stream = None if ENABLE_BUFFER_LIMIT else open(CSV_FILENAME, mode='w', newline='', encoding='utf-8')
 writer = None if ENABLE_BUFFER_LIMIT else csv.writer(file_stream)
 if writer:
@@ -300,7 +315,7 @@ try:
         # Обработка записи: кольцевой буфер либо потоковый файл
         if ENABLE_BUFFER_LIMIT:
             row_buffer.append(row_data)
-            # Перезаписываем файл на диске 1 раз в секунду (каждые 4 тика) для защиты SSD от износа
+            # Перезапись на диск 1 раз в секунду (каждые 4 тика)
             if tick_count % 4 == 0:
                 flush_buffer_to_disk()
         else:
@@ -319,7 +334,7 @@ try:
                 val = curr_sensor_map.get(s["id"], {}).get("value")
 
                 if val is None:
-                    val_str = "N/A"
+                    val_str = VALUE_NA
                 else:
                     l_lower = label.lower()
                     if "volt" in l_lower or "(v)" in l_lower:
@@ -339,25 +354,23 @@ try:
                 snd_str = f"{recorder.current_sound_dba:>12.1f}"
             else:
                 snd_str = f"{'--.-':>12}"
-            out_lines.append(f"{'Sound Level (dBA)':<36} {snd_str}")
+            out_lines.append(f"{LABEL_SOUND_LEVEL:<36} {snd_str}")
             out_lines.append("-" * 50)
 
-        out_lines.append(f"{'Elapsed Time (s)':<36} {elapsed:>12.1f}")
+        out_lines.append(f"{LABEL_ELAPSED_TIME:<36} {elapsed:>12.1f}")
 
         # Индикатор кольцевого буфера
         if ENABLE_BUFFER_LIMIT:
             buffer_pct = (len(row_buffer) / BUFFER_MAX_SAMPLES) * 100
-            span_sec = len(row_buffer) * INTERVAL
-            out_lines.append(f"{'Buffer Window':<36} {f'{buffer_pct:.0f}%':>12}")
+            out_lines.append(f"{LABEL_BUFFER_WINDOW:<36} {f'{buffer_pct:.0f}%':>12}")
 
         out_lines.append("-" * 50)
-        out_lines.append("Press Ctrl+C to stop logging.")
+        out_lines.append(HINT_PRESS_CTRL_C)
 
-        # Каждая строка снабжается маркером очистки остатка \033[K
         formatted_block = "\n".join(f"{line}\033[K" for line in out_lines)
         current_line_count = len(out_lines)
 
-        # Перемещение курсора на начало блока и перезапись
+        # Плавное in-place обновление строк без мерцания
         if not first_run:
             sys.stdout.write(f"\r\033[{prev_line_count - 1}A")
         else:
@@ -372,16 +385,15 @@ try:
 
 except KeyboardInterrupt:
     sys.stdout.write("\n\n")
-    print("[STOP] Logging stopped by user.")
-    # При выходе гарантированно сбрасываем последние отсчеты на диск
+    print(MSG_LOGGING_STOPPED)
     if ENABLE_BUFFER_LIMIT:
         flush_buffer_to_disk()
     elif file_stream:
         file_stream.close()
 
-    print(f"[SUCCESS] Telemetry CSV saved to: {CSV_FILENAME}")
+    print(MSG_CSV_SAVED.format(file=CSV_FILENAME))
     if recorder.is_active:
-        print(f"[SUCCESS] Audio recording saved to: {AUDIO_FILENAME}")
+        print(MSG_AUDIO_SAVED.format(ext=AUDIO_EXT.replace(".", "").upper(), file=AUDIO_FILENAME))
 finally:
     recorder.close()
     if file_stream and not file_stream.closed:

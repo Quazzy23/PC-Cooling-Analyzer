@@ -1,12 +1,14 @@
-"""
-Системные настройки разработчика, палитры цветов, поддержка режима ALL и сохранение пресетов
-"""
+"""Системные константы, цветовые палитры и методы работы с пресетами вида."""
 import os
 import json
 
-# =======================================================
-#               ЦВЕТОВЫЕ ПАЛИТРЫ ПО УМОЛЧАНИЮ
-# =======================================================
+from core.texts import (
+    DEFAULT_CPU_MODE, DEFAULT_GPU_MODE,
+    CHART_TITLE_P1_PREFIX, CHART_TITLE_P2,
+    LABEL_SOUND_DBA, LABEL_SOUND_LEVEL
+)
+
+# Цветовые палитры графиков по умолчанию
 P1_PALETTE = [
     "#FF3366", "#FF9900", "#00E5FF", "#AA00FF", "#00FFCC",
     "#FFD700", "#FF1493", "#00BFFF", "#33FF57", "#FF6F00"
@@ -17,9 +19,7 @@ P2_PALETTE = [
     "#FF6F00", "#00FFCC", "#AA00FF", "#00E5FF", "#FF3366"
 ]
 
-# =======================================================
-#               AUDIO ANALYZER PROFILE (DEV)
-# =======================================================
+# Системные лимиты аудиоанализатора
 AUDIO_PROFILE = {
     "limit_freq_min": 20.0,
     "limit_freq_max": 8000.0,
@@ -32,57 +32,49 @@ AUDIO_PROFILE = {
     "calibration_offset": 90.0
 }
 
-# Фиксируем корень проекта независимо от текущей рабочей директории терминала
+# Абсолютные пути к системным файлам
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "system_info", "sensors_config.json")
 AUDIO_CONFIG_PATH = os.path.join(PROJECT_ROOT, "system_info", "audio_config.json")
 VIEW_STATE_PATH = os.path.join(PROJECT_ROOT, "system_info", "view_state.json")
 
 
-def determine_default_axis(label_name: str) -> str:
-    l = label_name.lower()
-    if "(c)" in l or "temp" in l or "rpm" in l or "fan" in l or "pump" in l:
-        return "left"
-    return "right"
-
-
 def get_available_profiles(config_path: str = DEFAULT_CONFIG_PATH) -> list:
-    """Возвращает список реальных доступных профилей из sensors_config.json"""
+    """Возвращает список доступных профилей из конфига."""
     if not os.path.exists(config_path):
-        return ["CPU", "GPU"]
+        return [DEFAULT_CPU_MODE, DEFAULT_GPU_MODE]
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        modes = [k for k in data.keys() if k != "active_mode"]
-        return modes if modes else ["CPU", "GPU"]
+        modes = list(data.keys())
+        return modes if modes else [DEFAULT_CPU_MODE, DEFAULT_GPU_MODE]
     except Exception:
-        return ["CPU", "GPU"]
+        return [DEFAULT_CPU_MODE, DEFAULT_GPU_MODE]
 
 
 def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH) -> dict:
-    """Загружает конкретный профиль датчиков (CPU, GPU, RAM и др.) с учетом поля order"""
+    """Загружает структуру датчиков профиля с сортировкой по order."""
     saved_active = load_last_active_mode()
-    target_mode = (mode or saved_active or "CPU").upper()
+    target_mode = (mode or saved_active or DEFAULT_CPU_MODE).upper()
+
+    # Шаблон пустого профиля при отсутствии файла
+    empty_profile = {
+        "mode_name": target_mode,
+        "summary_dir_name": target_mode.lower(),
+        "panel1_sensors": [],
+        "panel2_title": CHART_TITLE_P2,
+        "panel2_sensors": [],
+        "export_sensors": []
+    }
 
     if not os.path.exists(config_path):
-        return {
-            "mode_name": target_mode,
-            "summary_dir_name": target_mode.lower(),
-            "chart_title_prefix": f"{target_mode} Thermal & Electrical Load Dynamics",
-            "panel1_sensors": [],
-            "panel2_title": "Cooling Hardware Speeds & Sound Level",
-            "panel2_sensors": [],
-            "export_sensors": []
-        }
+        return empty_profile
 
     with open(config_path, "r", encoding="utf-8") as f:
         try:
             data = json.load(f)
         except Exception:
-            data = {}
-
-    target_mode = (mode or saved_active or "CPU").upper()
+            return empty_profile
 
     p1_sensors = []
     p2_sensors = []
@@ -91,7 +83,8 @@ def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH
 
     mode_data = data.get(target_mode, {})
 
-    raw_p1 = mode_data.get("panel1_thermal_and_power") or mode_data.get("P1_thermal_and_power") or []
+    # Считывание датчиков Panel 1
+    raw_p1 = mode_data.get("panel1_thermal_and_power", [])
     raw_p1 = sorted(raw_p1, key=lambda x: x.get("order", 999))
     for idx, item in enumerate(raw_p1):
         sid = str(item.get("id", "")).strip()
@@ -108,7 +101,8 @@ def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH
             })
             export_sensors.append((name, sid))
 
-    raw_p2 = mode_data.get("panel2_cooling_and_speed") or mode_data.get("P2_cooling_and_speed") or []
+    # Считывание датчиков Panel 2
+    raw_p2 = mode_data.get("panel2_cooling_and_speed", [])
     raw_p2 = sorted(raw_p2, key=lambda x: x.get("order", 999))
     for idx, item in enumerate(raw_p2):
         sid = str(item.get("id", "")).strip()
@@ -125,10 +119,7 @@ def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH
             })
             export_sensors.append((name, sid))
 
-    summary_dir = mode_data.get("summary_dir_name", target_mode.lower())
-    chart_title = mode_data.get("chart_title_prefix", f"{target_mode} Thermal & Electrical Load Dynamics")
-
-    # Авто-добавление микрофона в конец P2 (если включено в audio_config.json)
+    # Добавление датчика шума микрофона, если включен
     if os.path.exists(AUDIO_CONFIG_PATH) and "/audio/0/sound/0" not in seen_sids:
         try:
             with open(AUDIO_CONFIG_PATH, "r", encoding="utf-8") as af:
@@ -138,44 +129,27 @@ def load_sensor_profile(mode: str = None, config_path: str = DEFAULT_CONFIG_PATH
                 p2_sensors.append({
                     "key": "sound",
                     "id": "/audio/0/sound/0",
-                    "label": "Sound (dBA)",
+                    "label": LABEL_SOUND_DBA,
                     "color": P2_PALETTE[idx % len(P2_PALETTE)],
                     "axis": "left",
                     "visible": False
                 })
-                export_sensors.append(("Sound Level (dBA)", "/audio/0/sound/0"))
+                export_sensors.append((LABEL_SOUND_LEVEL, "/audio/0/sound/0"))
         except Exception:
             pass
 
     return {
         "mode_name": target_mode,
-        "summary_dir_name": summary_dir,
-        "chart_title_prefix": chart_title,
+        "summary_dir_name": mode_data.get("summary_dir_name", target_mode.lower()),
         "panel1_sensors": p1_sensors,
-        "panel2_title": "Cooling Hardware Speeds & Sound Level",
+        "panel2_title": CHART_TITLE_P2,
         "panel2_sensors": p2_sensors,
         "export_sensors": export_sensors
     }
 
 
-def save_user_view_state(mode: str, state_dict: dict, path: str = VIEW_STATE_PATH):
-    """Сохраняет текущий вид и запоминает активный режим"""
-    all_states = {}
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                all_states = json.load(f)
-        except Exception:
-            pass
-
-    all_states["last_active_mode"] = mode
-    all_states[mode] = state_dict
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(all_states, f, indent=4, ensure_ascii=False)
-
-
 def load_user_view_state(mode: str, path: str = VIEW_STATE_PATH) -> dict:
+    """Загружает сохраненные слои и параметры вида для профиля."""
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -187,18 +161,19 @@ def load_user_view_state(mode: str, path: str = VIEW_STATE_PATH) -> dict:
 
 
 def load_last_active_mode(path: str = VIEW_STATE_PATH) -> str:
-    """Считывает последний активный режим из view_state.json"""
+    """Считывает имя последнего активного профиля."""
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 all_states = json.load(f)
-                return all_states.get("last_active_mode", "CPU")
+                return all_states.get("last_active_mode", DEFAULT_CPU_MODE)
         except Exception:
             pass
-    return "CPU"
+    return DEFAULT_CPU_MODE
+
 
 def save_all_session_view_states(active_mode: str, session_states: dict, path: str = VIEW_STATE_PATH):
-    """Сохраняет на диск сразу ВСЕ настроенные в сессии профили (CPU, GPU, ALL)"""
+    """Сохраняет пресеты вида всех настроенных профилей в файл."""
     all_states = {}
     if os.path.exists(path):
         try:

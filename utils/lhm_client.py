@@ -1,14 +1,20 @@
 """
 Клиент для взаимодействия с LibreHardwareMonitor:
-- Определение CPU и GPU строго через встроенный Enum: HardwareType
-- Автозапуск и безопасное закрытие процесса LHM
-- Опрос и парсинг дерева датчиков Web API
+- Определение CPU и GPU строго через встроенный Enum HardwareType.
+- Автозапуск (с правами администратора) и безопасное закрытие процесса LHM.
+- Опрос и парсинг дерева датчиков Web API.
 """
 import os
 import json
 import time
 import subprocess
 import requests
+
+from core.texts import (
+    MSG_LHM_NOT_RUNNING, MSG_LHM_LAUNCHED, MSG_LHM_READY,
+    MSG_LHM_LAUNCH_FAIL, MSG_LHM_EXE_NOT_FOUND, MSG_LHM_CLOSED,
+    MSG_DLL_READ_FAIL
+)
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SYS_INFO_DIR = os.path.join(PROJECT_ROOT, "system_info")
@@ -19,7 +25,7 @@ FALLBACK_LHM_EXE_PATH = r"C:\Program Files\LibreHardwareMonitor\LibreHardwareMon
 
 
 def get_lhm_exe_path() -> str:
-    """Считывает путь к LibreHardwareMonitor.exe (поддерживает путь к папке или к файлу)"""
+    """Считывает путь к исполняемому файлу LHM из файла конфигурации."""
     if os.path.exists(LHM_PATH_FILE):
         try:
             with open(LHM_PATH_FILE, "r", encoding="utf-8") as f:
@@ -38,7 +44,7 @@ def get_lhm_exe_path() -> str:
 
 
 def get_lhm_dll_path() -> str:
-    """Находит LibreHardwareMonitorLib.dll рядом с исполняемым файлом LHM"""
+    """Находит библиотеку LibreHardwareMonitorLib.dll рядом с исполняемым файлом LHM."""
     exe_path = get_lhm_exe_path()
     lhm_dir = os.path.dirname(exe_path) if exe_path.lower().endswith(".exe") else exe_path
     dll_path = os.path.join(lhm_dir, "LibreHardwareMonitorLib.dll")
@@ -46,16 +52,19 @@ def get_lhm_dll_path() -> str:
         return dll_path
     return None
 
+
 def unblock_file(file_path: str):
-    """Снимает блокировку безопасности Windows (Zone.Identifier) с файла"""
+    """Снимает блокировку безопасности Windows (Zone.Identifier) с файла."""
     if not file_path or not os.path.exists(file_path):
         return
+    
     # Способ 1: прямое удаление потока NTFS через Win32 API
     try:
         import ctypes
         ctypes.windll.kernel32.DeleteFileW(f"{file_path}:Zone.Identifier")
     except Exception:
         pass
+
     # Способ 2: нативная команда PowerShell
     try:
         subprocess.run(
@@ -66,8 +75,8 @@ def unblock_file(file_path: str):
         pass
 
 
-def clean_sensor_value(val_str):
-    """Очищает строку датчика от единиц измерения и преобразует в float"""
+def clean_sensor_value(val_str: str) -> float | None:
+    """Очищает строку датчика от единиц измерения и преобразует в float."""
     if not val_str:
         return None
     cleaned = (
@@ -91,8 +100,8 @@ def clean_sensor_value(val_str):
         return None
 
 
-def ensure_lhm_running(exe_path: str = None, url: str = LHM_URL):
-    """Проверяет доступность LHM API и запускает процесс с правами админа с ожиданием веб-сервера"""
+def ensure_lhm_running(exe_path: str = None, url: str = LHM_URL) -> bool:
+    """Проверяет доступность LHM Web API и при необходимости запускает процесс от Администратора."""
     try:
         r = requests.get(url, timeout=0.8)
         if r.status_code == 200:
@@ -101,41 +110,40 @@ def ensure_lhm_running(exe_path: str = None, url: str = LHM_URL):
         pass
 
     target_exe = exe_path or get_lhm_exe_path()
-    print("[INFO] LibreHardwareMonitor is not running. Auto-starting background process...")
+    print(MSG_LHM_NOT_RUNNING)
     if os.path.exists(target_exe):
         try:
             os.startfile(target_exe, "runas")
-            print(f"[OK] Launched {os.path.basename(target_exe)} (Admin). Waiting for web server at {url}...")
+            print(MSG_LHM_LAUNCHED.format(name=os.path.basename(target_exe), url=url))
             for _ in range(20):
                 time.sleep(0.5)
                 try:
                     check_res = requests.get(url, timeout=0.8)
                     if check_res.status_code == 200:
-                        print("[OK] Web server is ready!")
+                        print(MSG_LHM_READY)
                         return True
                 except Exception:
                     pass
             return True
         except Exception as e:
-            print(f"[WARNING] Could not auto-launch {target_exe}: {e}")
+            print(MSG_LHM_LAUNCH_FAIL.format(target=target_exe, err=e))
             return False
     else:
-        print(f"[WARNING] Executable not found at: {target_exe}")
-        print(f"Please specify the correct path in '{LHM_PATH_FILE}' (run 'python utils/init_configs.py')")
+        print(MSG_LHM_EXE_NOT_FOUND.format(path=target_exe, file=LHM_PATH_FILE))
         return False
 
 
 def close_lhm_process():
-    """Принудительно закрывает фоновый процесс LibreHardwareMonitor"""
+    """Принудительно завершает фоновый процесс LibreHardwareMonitor."""
     try:
         subprocess.run("taskkill /F /IM LibreHardwareMonitor.exe", shell=True, capture_output=True)
-        print("\n[OK] LibreHardwareMonitor process closed.")
+        print(MSG_LHM_CLOSED)
     except Exception:
         pass
 
 
-def flatten_json_tree(node, sensor_map, parent_hw_name="System"):
-    """Рекурсивно разворачивает JSON дерево LHM в плоский словарь датчиков"""
+def flatten_json_tree(node, sensor_map: dict, parent_hw_name: str = "System"):
+    """Рекурсивно разворачивает JSON-дерево LHM в плоский словарь активных датчиков."""
     if isinstance(node, dict):
         text = node.get("Text", "")
         sensor_id = node.get("SensorId")
@@ -167,11 +175,8 @@ def flatten_json_tree(node, sensor_map, parent_hw_name="System"):
             flatten_json_tree(item, sensor_map, parent_hw_name)
 
 
-def extract_hardware_structure(raw_json=None):
-    """
-    Определяет CPU и GPU строго через встроенный enum HardwareType библиотеки LibreHardwareMonitor.
-    Никакого парсинга строк и догадок.
-    """
+def extract_hardware_structure(raw_json: dict = None) -> tuple[str, dict]:
+    """Извлекает структуру железа, определяя CPU и GPU через enum HardwareType."""
     pc_name = "Unknown PC"
     if raw_json:
         root_children = raw_json.get("Children", [])
@@ -203,7 +208,6 @@ def extract_hardware_structure(raw_json=None):
                     hw_name = hardware.Name
                     hw_type_enum = hardware.HardwareType
 
-                    # Строгая проверка по системному перечислению LHM HardwareType
                     if hw_type_enum == HardwareType.Cpu:
                         hw_type_str = "CPU"
                         if detected_cpu == "CPU":
@@ -223,9 +227,9 @@ def extract_hardware_structure(raw_json=None):
                 computer.Close()
 
         except Exception as e:
-            print(f"[WARNING] Could not read hardware via LibreHardwareMonitorLib.HardwareType: {e}")
+            print(MSG_DLL_READ_FAIL.format(err=e))
 
-    # Резервный случай: если DLL заблокирована или не загрузилась
+    # Резервный сбор по JSON, если DLL недоступна
     if not hardware_list and raw_json:
         for hw in raw_json.get("Children", [{}])[0].get("Children", []):
             if isinstance(hw, dict):
