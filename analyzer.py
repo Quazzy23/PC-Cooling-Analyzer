@@ -653,10 +653,20 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
         self.seek_to_time(self.current_time_cursor)
 
     def transfer_sensor_to_plot(self, s: dict, target_plot: pg.PlotWidget):
-        """Переносит кривые, оверлеи и шкалы датчика с одного графика на другой"""
+        """Переносит датчик на новый график с ПЕРЕСОЗДАНИЕМ объектов (защита от краша OpenGL Context)"""
         k = s["key"]
+        c_color = self.sensor_colors.get(k, s.get('color', '#FFFFFF'))
 
-        # Удаляем со старого графика
+        # 1. Забираем массивы данных из старых кривых перед удалением
+        old_raw = self.curves.get(f"{k}_raw")
+        old_trend = self.curves.get(f"{k}_trend")
+        old_tag = self.intersection_tags.get(k)
+
+        x_raw, y_raw = old_raw.getData() if old_raw is not None else ([], [])
+        x_trend, y_trend = old_trend.getData() if old_trend is not None else ([], [])
+        was_visible = old_raw.isVisible() if old_raw is not None else False
+
+        # 2. Полностью удаляем старые элементы из памяти старого графика
         if k in self.viewboxes_map:
             vb_old = self.viewboxes_map[k]
             if vb_old.scene():
@@ -665,31 +675,45 @@ class StudioSuiteWindow(QtWidgets.QMainWindow):
             for ax in self.axes_map[k].values():
                 if ax.scene():
                     ax.scene().removeItem(ax)
-        if k in self.intersection_tags:
-            tag = self.intersection_tags[k]
-            if tag.scene():
-                tag.scene().removeItem(tag)
+        if old_tag and old_tag.scene():
+            old_tag.scene().removeItem(old_tag)
+        
+        # Вычищаем старые кривые из реестра
+        if old_raw in self._persistent_curves:
+            self._persistent_curves.remove(old_raw)
+        if old_trend in self._persistent_curves:
+            self._persistent_curves.remove(old_trend)
 
-        # Создаем оверлей на новом целевом графике
+        # 3. Создаем НОВЫЕ элементы в правильном контексте целевого графика
         cur_side = self.sensor_sides.get(k, "left")
-        vb_new, ax_l, ax_r = self.attach_overlay_view(target_plot, s['color'], cur_side)
+        vb_new, ax_l, ax_r = self.attach_overlay_view(target_plot, c_color, cur_side)
         self.plot_map[k] = target_plot
         self.viewboxes_map[k] = vb_new
         self.axes_map[k] = {'left': ax_l, 'right': ax_r}
 
-        # Переносим существующие кривые
-        c_raw = self.curves.get(f"{k}_raw")
-        c_trend = self.curves.get(f"{k}_trend")
-        tag = self.intersection_tags.get(k)
+        # 4. Отрисовываем кривые с нуля из сохраненных данных
+        pen_raw = create_pen(c_color, 1.2, self.current_raw_alpha)
+        pen_trend = create_pen(c_color, 2.4, self.current_trend_alpha)
+        
+        new_raw = pg.PlotCurveItem(x_raw, y_raw, pen=pen_raw)
+        new_trend = pg.PlotCurveItem(x_trend, y_trend, pen=pen_trend)
+        new_raw.setVisible(was_visible)
+        new_trend.setVisible(was_visible)
 
-        if c_raw:
-            vb_new.addItem(c_raw)
-        if c_trend:
-            vb_new.addItem(c_trend)
-        if tag:
-            vb_new.addItem(tag)
+        vb_new.addItem(new_raw)
+        vb_new.addItem(new_trend)
 
-        # Восстанавливаем видимость осей
+        self.curves[f"{k}_raw"] = new_raw
+        self.curves[f"{k}_trend"] = new_trend
+        self._persistent_curves.extend([new_raw, new_trend])
+
+        # 5. Пересоздаем тег пересечения
+        new_tag = create_value_tag(c_color)
+        new_tag.setVisible(was_visible)
+        vb_new.addItem(new_tag)
+        self.intersection_tags[k] = new_tag
+
+        # 6. Восстанавливаем видимость осей
         is_visible = self.sensor_visibility.get(k, False)
         target_axis = self.axes_map[k][cur_side]
         target_axis.setVisible(is_visible)

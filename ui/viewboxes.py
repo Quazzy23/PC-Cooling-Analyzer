@@ -307,7 +307,8 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
         return f"{t_sec:.1f}s", sensors_str
 
     def get_active_overlay_ranges(self):
-        return {k: vb.viewRange()[1] for k, vb in self.analyzer.viewboxes_map.items() if self.analyzer.sensor_move_active.get(k, False)}
+        # Собираем только те датчики, у которых кнопка [B] ВЫКЛЮЧЕНА (False)
+        return {k: vb.viewRange()[1] for k, vb in self.analyzer.viewboxes_map.items() if not self.analyzer.sensor_move_active.get(k, False)}
 
     def pan_overlays(self, delta_y_pixels, height):
         for k, start_vr_y in self.panning_data.get('overlay_ranges', {}).items():
@@ -336,7 +337,10 @@ class CleanTimeViewBox(BaseInteractiveViewBox):
         target_keys = {s["key"] for s in target_sensors}
 
         for k, vb in self.analyzer.viewboxes_map.items():
-            if k in target_keys and self.analyzer.sensor_move_active.get(k, False):
+            # Зум РАЗРЕШЕН по умолчанию (когда кнопка [B] выключена, т.е. False)
+            # Если кнопка [B] включена (True), зум блокируется
+            is_blocked = self.analyzer.sensor_move_active.get(k, False)
+            if k in target_keys and not is_blocked:
                 vr_y = vb.viewRange()[1]
                 mouse_y = vb.mapSceneToView(mouse_scene).y()
                 new_min_y = mouse_y - (mouse_y - vr_y[0]) * scale

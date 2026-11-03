@@ -23,9 +23,9 @@ of the 'analyzer.py' workstation.
 ================================================================================
 This area controls what is displayed on the P1 and P2 hardware charts.
 
-• CHECKBOX [✓] : Shows or hides the sensor curve on the chart.
-• [L] / [R] BTN: Assigns the sensor to the Left or Right Y-axis scale.
-• [M] BUTTON   : Locks/Unlocks the sensor's Y-axis for manual zooming (see below).
+• CHECKBOX [■] : Shows or hides the sensor curve on the chart.
+• [L]/[R] BTN  : Assigns the sensor to the Left or Right Y-axis scale.
+• [B] BUTTON   : Locks/Unlocks the sensor's Y-axis for manual zooming (see below).
 • DRAG & DROP  : 
   - Click and drag the grip icon [⠿] UP or DOWN to change the Z-layer of the 
     curve (higher in the list = on top of other curves).

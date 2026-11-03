@@ -191,12 +191,12 @@ def get_sensor_checkbox_qss(color_hex: str) -> str:
 
 
 def get_move_btn_qss(is_active: bool) -> str:
-    """Стиль кнопки [M] (активна / неактивна)"""
+    """Стиль кнопки [B] (Block). Если активна — рамка и текст голубые, фон темный"""
     if is_active:
         return """
             QPushButton {
-                background-color: #00E5FF;
-                color: #000000;
+                background-color: #1A1A1A;
+                color: #00E5FF;
                 font-weight: bold;
                 font-size: 7.5pt;
                 font-family: 'Segoe UI', Arial, sans-serif;

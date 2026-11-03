@@ -298,7 +298,8 @@ class StudioSidebar(QtWidgets.QFrame):
 
         row_widget = QtWidgets.QWidget()
         row_layout = QtWidgets.QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(1, 0, 1, 0)
+        # Добавлен отступ 6px справа, чтобы кнопки не прилипали к краю
+        row_layout.setContentsMargins(1, 0, 6, 0)
         row_layout.setSpacing(3)
         row_widget.setFixedHeight(24)
 
@@ -329,9 +330,9 @@ class StudioSidebar(QtWidgets.QFrame):
         self.analyzer.side_buttons[k] = btn_side
 
         is_move = self.analyzer.sensor_move_active.get(k, False)
-        btn_move = QtWidgets.QPushButton("M")
+        btn_move = QtWidgets.QPushButton("B")
         btn_move.setFixedSize(20, 17)
-        btn_move.setToolTip("Enable/Disable Zoom & Pan for this sensor")
+        btn_move.setToolTip("Block Y-Axis zoom for this sensor")
         btn_move.setStyleSheet(get_move_btn_qss(is_move))
         btn_move.clicked.connect(lambda _, key=k, btn=btn_move: self.analyzer.toggle_sensor_move(key, btn))
         row_layout.addWidget(btn_move)
